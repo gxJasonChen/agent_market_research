@@ -104,7 +104,7 @@ scripts/smoke.sh
 |---|---|---|
 | Worker 在跑吗 | `pgrep -af 'celery -A amr.worker.tasks'` | 没有 → 启动它 |
 | Worker 连上 broker 了吗 | `cd src && ../.venv/bin/python -m celery -A amr.worker.tasks:celery_app inspect ping` | 无响应 → 看 Worker 日志 |
-| 队列里积压吗 | `REDISCLI_AUTH='<口令>' redis-cli -n <REDIS_DB> LLEN celery` | 数字很大 → Worker 太慢或挂了 |
+| 队列里积压吗 | `export REDISCLI_AUTH='<口令>'` 后 `redis-cli -n <REDIS_DB> LLEN celery` | 数字很大 → Worker 太慢或挂了 |
 | Worker 启动就退 | `.artifacts/worker.log` 的 traceback | 多半是依赖缺失或配置读不到 |
 
 ### 5.2 作业变 `ERROR`

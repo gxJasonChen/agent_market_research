@@ -2,8 +2,8 @@
 
 `create_app` 必须支持**全部依赖作为参数注入**——集成测试才能在零外部依赖下跑通整层
 （NFR-001）。无参调用时按 `Settings` 装配生产实现，且**推迟到首个请求**：
-`import amr.api.app` 会被 `uvicorn amr.api.app:app` 在进程启动时执行，那一刻不该连
-MySQL、也不该 import celery/crewai。源项目的病根正是「import 期就连数据库建表」
+`import amr.api.app` 会被 `uvicorn amr.api.app:create_app --factory` 在进程启动时执行，
+那一刻不该连 MySQL、也不该 import celery/crewai。源项目的病根正是「import 期就连数据库建表」
 （spec/010 §4.1）。
 """
 

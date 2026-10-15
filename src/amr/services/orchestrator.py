@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from amr.domain.errors import IllegalTransitionError, RepositoryUnavailableError
+from amr.domain.errors import AmrError, IllegalTransitionError, RepositoryUnavailableError
 from amr.domain.inputs import CrewInputs
 from amr.ports.events import EventPublisher
 from amr.ports.runner import FlowRunner
@@ -103,7 +103,22 @@ class FlowExecutor:
                     self._finalize_attempts,
                     job_id,
                 )
+                if self._already_at(job_id, target):
+                    # 上一次其实写成功了，只是 commit 的应答丢在路上。
+                    # 这时作业已经是目标终态，重试必然撞上「终态不可重写」——
+                    # 把它当成功确认掉，而不是记成任务失败（数据是对的，指标不该说谎）。
+                    logger.info(
+                        "作业已在目标终态，收尾视为成功 job_id=%s target=%s", job_id, target
+                    )
+                    return
                 if attempt < self._finalize_attempts:
                     time.sleep(self._finalize_backoff_seconds * attempt)
         assert last is not None  # 循环只有在抛过异常时才可能走到这里
         raise last
+
+    def _already_at(self, job_id: str, target: str) -> bool:
+        """作业当前是否已经是 `target` 终态（读不到就当作否，让重试继续）。"""
+        try:
+            return self._service.get(job_id).status.value == target
+        except AmrError:
+            return False

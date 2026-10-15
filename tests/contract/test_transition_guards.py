@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from amr.domain.errors import IllegalTransitionError
+from amr.domain.errors import IllegalTransitionError, JobNotFoundError
 from amr.domain.models import Job
 from amr.domain.status import JobStatus
 
@@ -185,3 +185,67 @@ def test_list_recent_tie_break_is_deterministic(repository) -> None:
     ordered = repository.list_recent(limit=3)
 
     assert [job.job_id for job in ordered] == [f"{JOB_ID}-a", f"{JOB_ID}-b", f"{JOB_ID}-c"]
+
+
+# ------------------------------------------------------------------ TC-C-014
+
+
+def test_guard_order_is_the_same_in_both_implementations(repository) -> None:
+    """TC-C-014 四道判定的**顺序**也是契约：同一个非法调用必须抛同一种异常（spec/021 §1）。
+
+    顺序不一致时，调用方按异常类型分支就会「在内存实现上对、在 MySQL 上错」。
+    这把顺序钉死为：存在性 → 迁移合法性 → 占用 → 终态带 result。
+    """
+    now = datetime.now(UTC)
+
+    # 不存在的作业 + 写终态 + 没带 result → 必须先报「不存在」，而不是「终态没带 result」
+    with pytest.raises(JobNotFoundError):
+        repository.transition("definitely-missing", JobStatus.COMPLETE, at=now)
+
+    # 存在但迁移本身非法 + 没带 result → 先报「非法迁移」
+    repository.create(_make_job(JOB_ID, now))
+    repository.transition(JOB_ID, JobStatus.RUNNING, at=now)
+    repository.transition(JOB_ID, JobStatus.COMPLETE, result='{"ok": 1}', at=now)
+
+    with pytest.raises(IllegalTransitionError) as exc:
+        repository.transition(JOB_ID, JobStatus.ERROR, at=now)
+    assert exc.value.context.get("guard") != "terminal_requires_result"
+
+
+def test_mysql_stale_snapshot_cannot_claim_twice(mysql_repository) -> None:
+    """TC-C-014 第一层判定读到**过期快照**时，占用语义仍必须挡住第二次认领（REQ-002）。
+
+    这是复核发现的并发窗口：B 的 `SELECT` 早于 A 的 `commit`、B 的条件 UPDATE 晚于它时，
+    UPDATE 不命中（rowcount=0），而重读看到的是 `RUNNING`——**非终态**。
+    只看「是不是终态」的旧实现会把它判成「认领成功」，然后 B 把整条 Flow 再跑一遍。
+
+    真库上这个窗口很难稳定命中，所以这里直接把第一层判定打桩成过期状态，
+    **强制**走進 `rowcount==0` 那条分支。
+    """
+    from amr.adapters.mysql_repository import MySQLJobRepository
+
+    now = datetime.now(UTC)
+    mysql_repository.create(_make_job(JOB_ID, now))
+    mysql_repository.transition(JOB_ID, JobStatus.RUNNING, at=now)  # 模拟 A 已认领
+
+    # 让第一层判定看到「作业还是 PENDING」的过期快照
+    original = MySQLJobRepository._read_status
+    try:
+
+        def _stale(cursor: object, job_id: str) -> JobStatus:  # noqa: ARG001 —— 桩要匹配签名
+            return JobStatus.PENDING
+
+        MySQLJobRepository._read_status = staticmethod(_stale)  # type: ignore[method-assign]
+        with pytest.raises(IllegalTransitionError) as exc:
+            mysql_repository.transition(
+                JOB_ID,
+                JobStatus.RUNNING,
+                at=now,
+                expected_from=JobStatus.PENDING,
+            )
+    finally:
+        MySQLJobRepository._read_status = original  # type: ignore[method-assign]
+
+    assert exc.value.context.get("guard") == "expected_from"
+    stored = mysql_repository.get(JOB_ID)
+    assert stored is not None and stored.status is JobStatus.RUNNING

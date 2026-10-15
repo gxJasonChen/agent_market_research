@@ -27,7 +27,8 @@ jobs:
 
     services:
       # 契约测试要在真实 MySQL 上验证 JobRepository 的实现（spec/040 §2.2）。
-      # 连不上时测试会自行 skip，所以本 job 在无服务环境下也不会红（NFR-001）。
+      # 本地没有 MySQL 时用例会 skip（NFR-001），但 CI 里不行：下面设了
+      # AMR_REQUIRE_MYSQL=1，service 起不来就直接失败，避免「门禁绿但真库没验过」。
       mysql:
         image: mysql:8.0
         env:

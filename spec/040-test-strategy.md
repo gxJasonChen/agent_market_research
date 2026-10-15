@@ -69,6 +69,7 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | TC-C-011 | 占用语义 `expected_from` | REQ-002 | 认领失败 → `IllegalTransitionError`，`guard="expected_from"`；首次认领正常通过 |
 | TC-C-012 | 写终态必须带 `result` | REQ-004 | 缺 `result` 写终态被拒且库中状态不变；返回值是**新快照**不是过期读 |
 | TC-C-013 | `list_recent` 语义 | REQ-003 | 倒序 + 遵守 limit；`created_at` 并列按 `job_id` 升序；`limit < 1` 抛 `ValueError` |
+| TC-C-014 | 判定顺序 + 过期快照下的占用 | REQ-002/004 | 两个实现的异常类型一致；第一层判定读到**过期快照**时，占用语义仍挡住第二次认领（真库上把 `_read_status` 打桩强制进入该窗口） |
 
 > 契约层是「两个实现语义一致」的保证。MySQL 实现里那句「终态不可变」的条件 UPDATE 只有在真实数据库上才验得出来，所以这一层必须连真库。
 

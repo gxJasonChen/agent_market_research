@@ -205,3 +205,48 @@ def test_finalize_does_not_retry_on_programming_errors() -> None:
         executor.execute(job_id, INPUTS)
 
     assert repo.seen == 1, "非法迁移被重试了——重试掩盖并发冲突，且拖长 Worker 占用"
+
+
+def test_finalize_treats_already_at_target_as_success() -> None:
+    """TC-U-030 收尾写入**已提交但应答丢失**时，重试必须当成功，而不是记任务失败（REQ-004）。
+
+    复核发现的场景：`transition` 在服务端提交成功、`commit()` 的应答在路上丢了 →
+    抛 `RepositoryUnavailableError` → 重试 → 第二次读到终态 → 「终态不可重写」。
+    数据其实是对的（作业已 COMPLETE），若把它当失败，指标和日志都会说谎，
+    运维还会去查一个并不存在的问题。
+    """
+
+    class _CommitAckLost(RecordingJobRepository):
+        """第一次写终态：数据真的写进去了，但抛「存储不可用」模拟应答丢失。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.wrote = False
+
+        def transition(self, job_id, to, *, result=None, at, expected_from=None):  # type: ignore[no-untyped-def]
+            if to is JobStatus.COMPLETE and not self.wrote:
+                self.wrote = True
+                super().transition(job_id, to, result=result, at=at, expected_from=expected_from)
+                raise RepositoryUnavailableError("commit 应答丢失")
+            return super().transition(job_id, to, result=result, at=at, expected_from=expected_from)
+
+    repo = _CommitAckLost()
+    executor, service, _ = _harness(repository=repo)
+    job_id = _enqueue(service)
+
+    executor.execute(job_id, INPUTS)  # 不应抛异常
+
+    stored = repo.get(job_id)
+    assert stored is not None
+    assert stored.status is JobStatus.COMPLETE
+    assert stored.result is not None
+
+
+def test_finalize_still_raises_when_job_is_not_at_target() -> None:
+    """TC-U-030 补充：作业**不在**目标终态时，重试耗尽仍然必须抛（别把幂等确认放宽成吞异常）。"""
+    repo = _FlakyRepository(failures=99)
+    executor, service, _ = _harness(repository=repo, finalize_attempts=2)
+    job_id = _enqueue(service)
+
+    with pytest.raises(RepositoryUnavailableError):
+        executor.execute(job_id, INPUTS)

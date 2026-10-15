@@ -85,6 +85,10 @@ _SELECT_JOB = (
 #: `id` 是同秒同微秒事件之间的第二排序键：JobService 在同一个冻结时刻写两条事件是常态。
 _SELECT_EVENTS = "SELECT `timestamp`, data FROM events WHERE job_id=%s ORDER BY `timestamp`, id"
 
+#: 与上一条同义，但用锁定读：`transition` 的返回快照里，状态是 current read 拿的，
+#: 事件若还用快照读，就会拼出「最新状态 + 旧事件列表」的混合体。
+_SELECT_EVENTS_FOR_UPDATE = f"{_SELECT_EVENTS} FOR UPDATE"
+
 _SELECT_RECENT = (
     "SELECT job_id, status, customer_domain, project_description, result, created_at, updated_at"
     " FROM jobs ORDER BY created_at DESC, job_id ASC LIMIT %s"
@@ -213,18 +217,13 @@ class MySQLJobRepository:
         - 写终态但 `result` 为空 → `IllegalTransitionError`（源项目「假成功」的症状形状）
         - 同一非终态重复写入 → 幂等成功（`result` 传入时才更新）
         """
-        # 先按域名规则挡住「写终态却没有结果」——这正是源项目假成功的形状，
-        # 不能指望每个调用方都记得传 result（仓储是最后一道，不是唯一一道）
-        if is_terminal(to) and result is None:
-            raise IllegalTransitionError(
-                "写入终态必须带 result",
-                context={"job_id": job_id, "to": to.value, "guard": "terminal_requires_result"},
-            )
-
         self.ensure_schema()
         connection = self._connect()
         try:
             with connection.cursor() as cursor:
+                # 四道判定的**顺序与内存实现逐字一致**（存在性 → 迁移合法性 → 占用 → 终态带结果）。
+                # 顺序本身就是契约的一部分：同一个非法调用在两个实现上必须抛同一种异常，
+                # 否则调用方按异常类型分支就会时对时错。
                 current = self._read_status(cursor, job_id)
                 if current is None:
                     raise JobNotFoundError("作业不存在，无法迁移状态", context={"job_id": job_id})
@@ -244,6 +243,18 @@ class MySQLJobRepository:
                             "guard": "expected_from",
                         },
                     )
+                # 挡住「写终态却没有结果」——正是源项目假成功的形状。
+                # 放在最后一道是因为它检查的是**参数本身**，与库中状态无关；
+                # 前面的存在性/合法性错误更具体，应该先报。
+                if is_terminal(to) and result is None:
+                    raise IllegalTransitionError(
+                        "写入终态必须带 result",
+                        context={
+                            "job_id": job_id,
+                            "to": to.value,
+                            "guard": "terminal_requires_result",
+                        },
+                    )
 
                 expected = expected_from.value if expected_from is not None else None
                 cursor.execute(
@@ -251,7 +262,7 @@ class MySQLJobRepository:
                     (to.value, result, _to_db(at), job_id, expected, expected),
                 )
                 if cursor.rowcount == 0:
-                    self._raise_if_blocked(cursor, job_id, to)
+                    self._raise_if_blocked(cursor, job_id, to, expected_from)
 
                 # 用**锁定读**取返回快照：普通一致性读在 REPEATABLE READ 下看的是事务开始时的
                 # 快照，并发刚提交的终态它看不见，会把过期状态当结果返回给调用方。
@@ -336,28 +347,42 @@ class MySQLJobRepository:
         row = self._fetch_row(cursor)
         if row is None:
             return None
-        return _row_to_job(row, self._read_events(cursor, job_id))
+        return _row_to_job(row, self._read_events(cursor, job_id, for_update=for_update))
 
     @staticmethod
-    def _read_events(cursor: MySQLCursorAbstract, job_id: str) -> tuple[Event, ...]:
-        cursor.execute(_SELECT_EVENTS, (job_id,))
+    def _read_events(
+        cursor: MySQLCursorAbstract, job_id: str, *, for_update: bool = False
+    ) -> tuple[Event, ...]:
+        cursor.execute(_SELECT_EVENTS_FOR_UPDATE if for_update else _SELECT_EVENTS, (job_id,))
         return tuple(
             Event(timestamp=_from_db(row[0]), data=str(row[1]))
             for row in MySQLJobRepository._fetch_rows(cursor)
         )
 
     @staticmethod
-    def _raise_if_blocked(cursor: MySQLCursorAbstract, job_id: str, to: JobStatus) -> None:
+    def _raise_if_blocked(
+        cursor: MySQLCursorAbstract,
+        job_id: str,
+        to: JobStatus,
+        expected_from: JobStatus | None,
+    ) -> None:
         """条件 UPDATE 一行都没匹配到时，判定到底发生了什么。
 
-        只有三种可能，必须分清 —— 把「幂等重写」误判成并发冲突会让 Worker 重投递直接失败：
+        四种可能，必须分清 —— 把「幂等重写」误判成并发冲突会让 Worker 重投递直接失败：
 
         - 作业已被删除 → `JobNotFoundError`
         - 状态已是终态（另一个 Worker 抢先收尾）→ `IllegalTransitionError`
-        - 行还在、也还是非终态，只是值没变 → 幂等成功，什么都不做
+        - **状态与 `expected_from` 不符**（另一个 Worker 抢先认领）→ `IllegalTransitionError`
+        - 行还在、也还是非终态、状态也符合预期，只是值没变 → 幂等成功，什么都不做
 
-        `FOR UPDATE` 不是装饰：这里要的是**最新已提交**的状态。第一层判定用的是普通
-        一致性读，事务快照停留在并发者提交之前，直接重读会看到过期状态而漏判。
+        第三条是**并发认领的关键**：第一层判定用的是普通一致性读，事务快照停留在
+        并发者提交之前；条件 UPDATE 是 current read，会看到最新已提交的状态。
+        当 B 的 SELECT 早于 A 的 commit、B 的 UPDATE 晚于它时，UPDATE 不命中，
+        而重读看到的是 `RUNNING`——**非终态**。少了这一条，B 会被判定成「认领成功」，
+        然后**把整条 Flow 再跑一遍**。内存实现持锁原子判定，同场景必抛异常，
+        所以少这一条还会让两个实现的语义不一致（spec/021 §1）。
+
+        `FOR UPDATE` 不是装饰：这里要的是**最新已提交**的状态。
         """
         cursor.execute("SELECT status FROM jobs WHERE job_id=%s FOR UPDATE", (job_id,))
         row = MySQLJobRepository._fetch_row(cursor)
@@ -373,6 +398,17 @@ class MySQLJobRepository:
                     "from": actual.value,
                     "to": to.value,
                     "guard": "conditional_update",
+                },
+            )
+        if expected_from is not None and actual is not expected_from:
+            raise IllegalTransitionError(
+                "状态与预期不符，迁移作废",
+                context={
+                    "job_id": job_id,
+                    "from": actual.value,
+                    "to": to.value,
+                    "expected_from": expected_from.value,
+                    "guard": "expected_from",
                 },
             )
         logger.debug("幂等重写未产生变更：job_id=%s status=%s", job_id, actual.value)

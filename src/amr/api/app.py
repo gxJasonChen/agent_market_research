@@ -61,8 +61,9 @@ def create_app(
 ) -> FastAPI:
     """构造应用。依赖全部可注入；不传时按 `Settings` 装配生产实现。
 
-    生产装配**推迟到首个请求**（见 `api/deps.py`）：`import amr.api.app` 会被
-    `uvicorn amr.api.app:app` 在启动时执行，那一刻不该连 MySQL、也不该加载 celery。
+    生产装配**推迟到首个请求**（见 `api/deps.py`）：`import amr.api.app` 由
+    `uvicorn amr.api.app:create_app --factory` 在启动时执行，那一刻不该连 MySQL、
+    也不该加载 celery、更不该读 `.env`。
     """
     resolved = settings if settings is not None else get_settings()
     configure_logging(resolved)

@@ -110,6 +110,7 @@ class ExplodingRepository:
         *,
         result: str | None = None,
         at: datetime,
+        expected_from: JobStatus | None = None,
     ) -> Job:
         raise self.error
 

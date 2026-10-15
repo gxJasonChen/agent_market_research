@@ -72,6 +72,7 @@ class JobRepository(Protocol):
 | **占用语义**（TC-C-011） | 传 `expected_from` 而当前状态不符 → `IllegalTransitionError`（`guard="expected_from"`），库中状态不变 |
 | **终态必须带 result**（TC-C-012） | 写 `COMPLETE`/`ERROR` 而 `result is None` → `IllegalTransitionError`（`guard="terminal_requires_result"`），库中状态不变 |
 | **最近列表确定性**（TC-C-013） | `created_at` 并列时按 `job_id` 升序；`limit < 1` → `ValueError`（两个实现必须同语义） |
+| **判定顺序**（TC-C-014） | 四道判定必须同序：存在性 → 迁移合法性 → 占用 → 终态带 result。同一个非法调用在两个实现上必须抛**同一种**异常 |
 
 ---
 

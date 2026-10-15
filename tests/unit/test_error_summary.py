@@ -151,3 +151,37 @@ def test_illegal_transition_message_is_not_context_dump() -> None:
 
     assert summary == "非法的状态迁移"
     assert "guard=" not in summary
+
+
+def test_flow_result_validation_message_carries_no_foreign_text() -> None:
+    """TC-U-026 `FlowResult` 校验失败的 message 不得夹带 pydantic 原文（REQ-006 / CT-005）。
+
+    复核发现：message 里嵌 `{exc}` 时，pydantic 会把它收到的 `input_value=…`
+    （模型输出的片段）与 errors.pydantic.dev 链接一起塞进去——而 message 是
+    进 `result` 的通道。现在原文只进 context 的 `detail`（非白名单键，只进日志）。
+    """
+    import json
+
+    from amr.domain.errors import SchemaValidationError
+    from amr.domain.models import FlowResult
+
+    broken = {
+        "research_report": "x",
+        "strategy": {
+            "name": "n",
+            "tactics": "不是数组，这里可能夹带模型原文 sk-secret",
+            "channels": [],
+            "kpis": [],
+        },
+        "campaign_idea": {"name": "n", "description": "d", "audience": "a", "channel": "c"},
+        "copy": {"title": "t", "body": "b"},
+    }
+
+    with pytest.raises(SchemaValidationError) as exc:
+        FlowResult.from_json(json.dumps(broken, ensure_ascii=False))
+
+    summary = _safe_summary(exc.value)
+
+    assert "strategy.tactics" in summary  # 字段名要保留：排障必需
+    assert "sk-secret" not in summary
+    assert "errors.pydantic.dev" not in summary

@@ -157,7 +157,11 @@ def _validate[ModelT: BaseModel](model: type[ModelT], value: Any, key: str) -> M
         fields = sorted(
             f"{key}.{'.'.join(str(part) for part in err['loc'])}" for err in exc.errors()
         )
+        # message 只放**我们自己写的内容**（字段名）。pydantic 的报错原文里带
+        # `input_value=…` 与 errors.pydantic.dev 链接，而 message 会经 `_safe_summary`
+        # 进 `jobs.result` 回给调用方——等于把模型输出的片段与外部 URL 一起带出去。
+        # 原文放 context 的非白名单键，只进日志。
         raise SchemaValidationError(
-            f"结构化结果校验失败，字段：{', '.join(fields) or key}；{exc}",
-            context={"fields": fields},
+            f"结构化结果校验失败，字段：{', '.join(fields) or key}",
+            context={"fields": fields, "detail": str(exc)},
         ) from exc
