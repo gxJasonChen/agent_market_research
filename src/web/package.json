@@ -1,0 +1,28 @@
+{
+  "name": "amr-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "营销内容生成控制台前端（Vue 3 + TypeScript + Vite），对接 spec/022 冻结的 HTTP 契约",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --noEmit -p tsconfig.app.json && vue-tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "typescript": "~6.0.0",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.4",
+    "vue-tsc": "^3.3.13"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

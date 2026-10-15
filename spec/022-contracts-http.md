@@ -133,5 +133,14 @@ curl -s http://127.0.0.1:8012/api/crew/<job_id> | jq
 |---|---|
 | `src/api/crew.ts` | `submitCrew()` → `CT-001`；`fetchCrewJob()` → `CT-002` |
 | `src/types.ts` | `KnownJobStatus`、`CrewJobResponse`、`JobEvent` 与本节字段一一对应 |
-| 轮询 | 3 秒间隔；`status` 进入 `COMPLETE`/`ERROR` **立即停止**（`REQ-012`） |
+| 轮询 | 提交后立即拉一次，之后 3 秒间隔；停止规则见下表（`REQ-012`） |
 | 错误展示 | 优先取 `detail`（字符串或数组首项的 `msg`），否则 `HTTP <status>` |
+
+**轮询停止规则**（`REQ-012` 的落地口径）：
+
+| 响应 | 是否继续轮询 | 理由 |
+|---|---|---|
+| `200` + `COMPLETE` / `ERROR` | 停止 | 终态不会再变（`REQ-004`） |
+| `404` | 停止 | 作业不存在，重试不会改变结果 |
+| `503` / 网络错误 | 继续 | 暂时性故障，恢复后应自动跟上 |
+| `200` + 未知状态 | 继续 | 新增状态不视为破坏性变更（`CT-002`） |

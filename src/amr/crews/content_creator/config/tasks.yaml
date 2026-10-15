@@ -1,0 +1,31 @@
+# 阶段二的四个任务。三个结构化任务在 crew.py 里绑定了 output_json（REQ-006）。
+project_understanding_task:
+  description: >
+    详细了解 {project_description} 的项目背景与目标受众。审阅已有材料并补齐所需信息。
+  expected_output: >
+    包含项目细节与目标受众画像的全面总结。
+  agent: chief_marketing_strategist
+
+marketing_strategy_task:
+  description: >
+    基于客户的 {customer_domain} 与 {project_description} 制定全面的营销战略，
+    综合上游调研结论与项目理解中的关键洞察，构建高质量的战略方案。
+  expected_output: >
+    一份详尽的营销战略，必须覆盖四要素：战略名称、战术清单、推广渠道、关键绩效指标。
+  agent: chief_marketing_strategist
+
+campaign_idea_task:
+  description: >
+    为 {project_description} 构思创新的营销活动方案，确保创意独特、有吸引力，
+    并与整体营销战略保持一致。
+  expected_output: >
+    一个完整的活动创意，包含创意名称、说明、目标受众与投放渠道。
+  agent: creative_content_creator
+
+copy_creation_task:
+  description: >
+    根据已批准的 {project_description} 活动方案撰写营销文案，
+    确保内容吸引人、清晰易懂，并适配目标受众。
+  expected_output: >
+    一条完整广告文案，包含标题与正文。
+  agent: creative_content_creator

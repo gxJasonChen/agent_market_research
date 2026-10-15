@@ -113,17 +113,30 @@ class FlowExecutor(Protocol):
 
 ```
 execute(job_id, inputs):
-    job_service.mark_running(job_id)          # PENDING → RUNNING
+    try:
+        job_service.mark_running(job_id)            # PENDING → RUNNING
+    except IllegalTransitionError:
+        log.warning("作业已处于终态，跳过重复投递")   # at-least-once 下的幂等处理
+        return
     try:
         result = runner.run(job_id, inputs, sink)   # sink 落到 repository.append_event
-        job_service.finish_success(job_id, result)  # RUNNING → COMPLETE
     except Exception as exc:
-        job_service.finish_error(job_id, exc)       # RUNNING → ERROR，然后 **return**
-        # 绝不 fallthrough 到 finish_success —— 这就是源项目缺陷的形状（REQ-004）
+        job_service.finish_error(job_id, exc)       # RUNNING → ERROR
+        return                                      # ← 绝不 fallthrough 到成功分支
+    job_service.finish_success(job_id, result)      # RUNNING → COMPLETE
 ```
 
-**实现必须写成「异常分支带 `return`，成功路径在 `try` 之外/之后单走」**，不得写成两个 `if/else` 并列的写法。
+**实现必须写成「异常分支带 `return`，成功路径在 `try` 之后单走」**，不得写成两个 `if/else` 并列的写法。
 `tests/unit/test_orchestrator.py` 必须有一个用例：`runner.run` 抛异常后，仓储中状态是 `ERROR` 且**从未**出现 `COMPLETE`。
+
+### 3.2 两种 `IllegalTransitionError` 的处理必须不同
+
+| 来源 | 语义 | 处理 |
+|---|---|---|
+| `mark_running` 抛错 | 作业已在终态 = 队列重复投递（Celery 是 at-least-once） | **记 warning 后 return**，不重复执行、不抛异常（否则会把 Worker 拖进重试风暴） |
+| `finish_*` 抛错 | 并发收尾冲突，或代码写错了 | **让它抛出去**。吞掉它就等于把「失败作业被改写成功」这条缺陷重新放回系统（REQ-004） |
+
+这条区分是刻意的：**可幂等的地方幂等，不可幂等的地方必须响**。
 
 ---
 
@@ -141,17 +154,33 @@ class LLMProvider(Protocol):
     def build(self) -> ChatModel: ...
 ```
 
-支持的四类供应商（`REQ-008`）：
+支持的配置取值（`REQ-008`）：
 
-| 名称 | 凭据来源（环境变量） | 说明 |
+| `AMR_LLM_PROVIDER` | 凭据来源（环境变量） | 说明 |
 |---|---|---|
 | `openai` | `OPENAI_API_BASE` / `OPENAI_API_KEY` / `OPENAI_MODEL_NAME` | OpenAI 兼容网关，**默认** |
 | `oneapi` | `ONEAPI_API_BASE` / `ONEAPI_API_KEY` / `ONEAPI_MODEL_NAME` | OneAPI 网关 |
 | `ollama` | `OLLAMA_API_BASE` / `OLLAMA_API_KEY` / `OLLAMA_MODEL_NAME` | 本地推理，api_key 默认 `ollama` |
-| `fake` | 无 | 确定性桩模型，供离线测试与系统测试使用（**本系统新增**） |
+| `fake` | 无 | **离线确定性路径**，见下 |
 
 - 缺少必填环境变量时抛 `InvalidInputError`，信息里点明**缺哪个变量**（不含其值）。
-- `fake` 模型：对固定输入返回**固定输出**（含合法 JSON 片段），保证同一输入两次运行结果一致。
+
+### 4.1 `fake` 替换的是执行器，不是模型
+
+`fake` **不构造任何 CrewAI 模型**：`worker/bootstrap.build_executor` 见到 `fake` 时，
+把 `FlowRunner` 换成 `adapters/fake_runner.FakeFlowRunner`（确定性、零网络）。
+
+理由（实测，不是猜测）：CrewAI 1.15 的 `LLM` 把 `call` 委托给 provider 实现，
+桩对象拦不住——写一个 `LLM` 子类覆写 `call` 会被绕过，仍然去连真实的 OpenAI 端点；
+纯鸭子类型的桩则连 `Agent(llm=...)` 的 pydantic 校验都过不了（它只接受 `str | BaseLLM`）。
+硬凑出来的「通过」只是在测桩本身，不是在测系统。
+
+因此设计上承认这件事：**离线确定性由执行器层提供，而不是在模型层假装**。
+`llm_factory` 收到 `fake` 时抛 `InvalidInputError`，并在消息里指向 `worker/bootstrap.py`。
+
+这条路径覆盖的范围（系统测试 TC-S-001）：HTTP → JobService → Celery → Worker →
+FlowExecutor → Repository 全链路。**不覆盖** CrewAI 的真实行为——那由 `TC-S-004`
+（真实网关，`--run-real-llm`）负责。二者互补，不重叠。
 
 ---
 

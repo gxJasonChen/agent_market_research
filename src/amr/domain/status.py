@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -18,17 +18,17 @@ __all__ = [
 ]
 
 
-class JobStatus(str, Enum):
-    """作业状态。取值即 HTTP 契约字面量（spec/022 CT-002）。"""
+class JobStatus(StrEnum):
+    """作业状态。取值即 HTTP 契约字面量（spec/022 CT-002）。
+
+    用 `StrEnum` 而不是 `(str, Enum)`：后者的 `str()` 在 3.11 前后行为不一致，
+    日志与 f-string 里会打出 `JobStatus.PENDING` 这种读不出契约值的形式。
+    """
 
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     COMPLETE = "COMPLETE"
     ERROR = "ERROR"
-
-    def __str__(self) -> str:
-        # 3.11 起 mixin 枚举的 str() 行为有分歧，这里钉死成契约字面量，日志里可直接读
-        return self.value
 
 
 #: 终态：一旦进入，任何后续写入都必须被拒绝（REQ-004）

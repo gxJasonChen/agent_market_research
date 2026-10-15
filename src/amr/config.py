@@ -31,6 +31,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # 允许按**字段名**构造：测试写 `Settings(_env_file=None, llm_provider="openai")`
+        # 就能显式给配置，不必去动环境变量——环境变量是全局状态，会让用例互相污染。
+        populate_by_name=True,
     )
 
     # ---------------------------------------------------------- 模型供应商

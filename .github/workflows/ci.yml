@@ -1,0 +1,170 @@
+name: CI
+
+# 多 Agent 交付流水线里属于 CI 的那一段（spec/000 §2）：
+#   1. gate      —— 本地门禁在干净环境里再跑一遍（lint / type / test）
+#   2. open-pr   —— push 到 bugfix 后自动开 PR 到 development，通知 QA Agent（Codex）
+# Claude 不手动开 PR；development 由 Codex 操作；main 只接受人工合并。
+
+on:
+  push:
+    branches: [bugfix]
+  pull_request:
+    branches: [development, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: 门禁（lint / type / test）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # 契约测试要在真实 MySQL 上验证 JobRepository 的实现（spec/040 §2.2）。
+      # 连不上时测试会自行 skip，所以本 job 在无服务环境下也不会红（NFR-001）。
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: amr_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pci-root-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ci-root-password
+      MYSQL_DATABASE: amr_test
+      # CI 不碰真实模型网关；AMR_LLM_PROVIDER 缺省即 openai，但没有任何测试会真的调用它
+      AMR_LOG_LEVEL: WARNING
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: 同步依赖
+        run: uv sync --extra dev
+
+      - name: lint（ruff check + format --check）
+        run: make lint
+
+      - name: type（mypy 严格模式）
+        run: make type
+
+      - name: test（单元 + 契约 + 集成）
+        run: make test
+
+      - name: 覆盖率（domain 与 services 需 ≥ 95%）
+        run: make coverage
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  open-pr:
+    name: 自动开 PR 到 development（通知 Codex）
+    needs: gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/bugfix'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 确保 development 分支存在
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/branches/development" >/dev/null 2>&1; then
+            echo "development 已存在"
+          else
+            echo "development 不存在，从 main 创建"
+            sha=$(git rev-parse origin/main)
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/development" -f sha="${sha}"
+          fi
+
+      - name: 开或更新 PR（bugfix → development）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short HEAD)
+          subject=$(git log -1 --pretty=%s)
+
+          body=$(cat <<EOF
+          ## 交棒给 QA（Codex）
+
+          开发 Agent（Claude）已完成本轮改动并推送 \`bugfix\`，本地门禁与 CI 门禁均已通过。
+
+          - commit: \`${short}\` — ${subject}
+          - 分支: \`bugfix\` → \`development\`
+          - 规格: 见仓库 \`spec/\`（唯一事实来源）；测试用例与需求追溯表见 \`spec/040-test-strategy.md\`
+
+          ### 请 QA 完成
+          1. code review（按 spec/000-constitution.md 的分层红线与编码规范）
+          2. 系统测试（\`make test-system\`，需真实 MySQL/Redis；真实模型用 \`--run-real-llm\` 开启）
+          3. 通过后合并到 \`development\`
+
+          ### Finding 回传方式
+          在 PR 里留 review 评论即可，开发 Agent 会在 \`bugfix\` 分支上继续修复并重推，
+          直到 High 级别问题清零为止。
+
+          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          EOF
+          )
+
+          existing=$(gh pr list --repo "${GITHUB_REPOSITORY}" \
+            --head bugfix --base development --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "${existing}" ]; then
+            echo "PR #${existing} 已存在，更新描述"
+            gh pr edit "${existing}" --repo "${GITHUB_REPOSITORY}" \
+              --title "bugfix → development（${short}）" --body "${body}"
+          else
+            gh pr create --repo "${GITHUB_REPOSITORY}" \
+              --base development --head bugfix \
+              --title "bugfix → development（${short}）" --body "${body}"
+          fi
+
+      - name: 在 PR 上留言通知 QA（Codex）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --repo "${GITHUB_REPOSITORY}" \
+            --head bugfix --base development --state open --json number --jq '.[0].number // empty')
+          if [ -z "${number}" ]; then
+            echo "没有找到打开的 PR，跳过留言"
+            exit 0
+          fi
+          gh pr comment "${number}" --repo "${GITHUB_REPOSITORY}" --body \
+            "@codex 门禁已全绿，请对 commit \`$(git rev-parse --short HEAD)\` 做 code review 与系统测试。Finding 请直接留评，我会在 \`bugfix\` 分支上修复后重推。"

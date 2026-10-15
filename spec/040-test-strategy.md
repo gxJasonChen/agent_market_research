@@ -8,6 +8,10 @@
 | 契约 | `tests/contract/` | 真实 MySQL（同一套用例也跑内存实现） | 百 ms | ~10% |
 | 集成 | `tests/integration/` | FastAPI TestClient + 内存适配器 + Celery eager | 百 ms | ~20% |
 | 系统 | `tests/system/` | 真 MySQL + 真 Redis + 真 Worker + 真网关 | 秒~分钟 | ~5% |
+| 前端 | `src/web/src/**/*.spec.ts` | vitest（node 环境） | ms | 随前端代码 |
+
+前端是独立技术栈，用 vitest 原地测试（`npm run test`），不进 pytest 门禁；
+它的**交付可用性**由 `TC-S-005` 在系统层把关（type-check + build + 接口路径）。
 
 **离线红线（`NFR-001`）**：前三层**必须**能在无网络、无密钥、无 MySQL/Redis 的机器上全绿。这是 CI 的前提，也是 TDD 红绿循环能跑得动的前提。
 
@@ -47,8 +51,10 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | TC-U-019 | 文案任务显式 `context` 依赖 | REQ-007 | `context` 含战略与创意两个 Task |
 | TC-U-020 | `llm_factory` 缺变量报错 | REQ-008/009 | 异常信息含变量名、**不含变量值** |
 | TC-U-021 | `llm_factory` 四供应商分支 | REQ-008 | `openai`/`oneapi`/`ollama`/`fake` 均可构造 |
-| TC-U-022 | 架构守护：`services` 不 import 适配器 | NFR-004 | AST 扫描 `src/amr/services/**` 的 import，禁止 `adapters`/`crewai`/`celery`/`mysql`/`redis` |
-| TC-U-023 | 架构守护：`domain` 零外部依赖 | NFR-004 | `domain/**` 只允许标准库 + pydantic |
+| TC-U-022 | 架构守护：分层依赖只能向内 | NFR-004 | AST 扫描每一层的 import：`services` 不得引适配器/框架，`domain` 不得引任何本项目层 |
+| TC-U-023 | 架构守护：`domain` 零外部依赖 | NFR-004 | `domain/**` 只允许标准库 + pydantic；扫描器自身有用例证明不是「永远通过」 |
+| TC-U-024 | 装配点按 `AMR_LLM_PROVIDER` 分派执行器 | REQ-008 | `fake` → `FakeFlowRunner`；真实供应商缺配置时**装配期**就报错，不拖到首次调用 |
+| TC-U-025 | 装配不触网 | REQ-009 | 构造仓储不连库（给一个不可达地址也必须构造成功）；Worker 侧队列一用就报错 |
 
 ### 2.2 契约层
 
@@ -99,11 +105,11 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | REQ-005 事件流水 | TC-U-016 | TC-C-004 | TC-I-010 | TC-S-001 |
 | REQ-006 结构化输出 | TC-U-007, 008, 018 | — | TC-I-008 | TC-S-001, TC-S-004 |
 | REQ-007 双 Crew 编排 | TC-U-017, 019 | — | TC-I-008 | TC-S-001, TC-S-004 |
-| REQ-008 多供应商 | TC-U-021 | — | — | TC-S-004 |
-| REQ-009 配置安全 | TC-U-020 | — | TC-I-012 | TC-S-003 |
+| REQ-008 多供应商 | TC-U-021, TC-U-024 | — | — | TC-S-004 |
+| REQ-009 配置安全 | TC-U-020, TC-U-025 | — | TC-I-012 | TC-S-003 |
 | REQ-010 输入校验 | TC-U-005, 006 | — | TC-I-003 | TC-S-001 |
 | REQ-011 错误语义 | TC-U-010 | — | TC-I-006, 007, 012 | — |
-| REQ-012 前端控制台 | — | — | — | TC-S-005 |
+| REQ-012 前端控制台 | — | — | — | TC-S-005 + 前端 vitest：`useJobPolling.spec.ts`（轮询间隔与停止规则）、`crew.spec.ts`（CT-001/002/005）、`result.spec.ts`（result 形状容错）、`url.spec.ts`（job_id 回填）、`App.spec.ts`（首屏与徽章） |
 | REQ-013 可观测性 | — | — | TC-I-010 | TC-S-001 |
 | REQ-014 健康检查 | — | — | TC-I-011 | TC-S-003 |
 | NFR-001 离线可跑 | 全部（CI 在无密钥环境执行） | | | |

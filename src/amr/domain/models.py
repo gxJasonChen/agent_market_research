@@ -14,7 +14,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -145,10 +145,7 @@ class FlowResult:
         )
 
 
-ModelT = TypeVar("ModelT", bound=BaseModel)
-
-
-def _validate(model: type[ModelT], value: Any, key: str) -> ModelT:
+def _validate[ModelT: BaseModel](model: type[ModelT], value: Any, key: str) -> ModelT:
     """校验子模型，并把顶层字段名拼进错误定位。
 
     没有这一层，错误里只有 `tactics` —— 但 `tactics` 在战略和创意里都可能出现，

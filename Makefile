@@ -31,9 +31,10 @@ test: ## 门禁：单元 + 契约 + 集成（离线可跑）
 test-fast: ## 迭代用：只跑单元测试，遇错即停
 	$(PY) -m pytest tests/unit -x -q
 
-coverage: ## 带覆盖率的完整门禁测试
+coverage: ## 带覆盖率的完整门禁测试，并按分层校验门槛（NFR-003）
 	$(PY) -m pytest tests/unit tests/contract tests/integration \
 		--cov=src/amr --cov-report=term-missing --cov-report=xml
+	$(PY) scripts/check_coverage.py coverage.xml
 
 test-system: ## 系统测试：需真实 MySQL/Redis，真实网关用 --run-real-llm 开启
 	$(PY) -m pytest tests/system -m system

@@ -1,0 +1,11 @@
+# 阶段一的任务。{customer_domain} / {project_description} 由 kickoff(inputs=...) 注入，
+# 占位符必须是 CrewInputs 的字段名（由 tests/unit/test_crews_config.py 校验）。
+research_task:
+  description: >
+    围绕客户提供的 {customer_domain}，深入分析其产品与主要竞争对手，挖掘关键趋势与洞察。
+    聚焦最近 12 个月内的最新动态，请以当前日期为基准检索，不要沿用训练数据里的年份，
+    以免给出过时的调研结论。当前合作项目概述：{project_description}。
+  expected_output: >
+    一份面向客户、客户产品与竞争对手的全面调研报告，包含关键指标、市场偏好、
+    定位策略与受众参与度分析。
+  agent: lead_market_analyst

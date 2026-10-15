@@ -3,7 +3,8 @@ name = "agent-market-research"
 version = "0.1.0"
 description = "多智能体市场调研与营销内容生成系统（SDD/TDD）"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+# 3.11 起才有 datetime.UTC；spec/010 §6 也把目标定在 3.12，这里与规格对齐
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "celery>=5.4",
     "crewai[tools]>=1.15.23,<2.0.0",
@@ -62,7 +63,7 @@ exclude_lines = [
 # ---------------------------------------------------------------- ruff
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -89,7 +90,7 @@ ignore = [
 
 # ---------------------------------------------------------------- mypy
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 files = ["src/amr"]
 mypy_path = "src"
 explicit_package_bases = true
@@ -107,6 +108,15 @@ warn_return_any = true
 strict_equality = true
 extra_checks = true
 show_error_codes = true
+
+# CrewAI 的 `@agent` / `@task` 用「config 里带 description/expected_output」的调用形式，
+# 而 `Task.__init__` 的静态签名要求这两个参数显式传入——运行时由 config 补齐，
+# 静态检查看不到，因此只放行这一类错误。
+# 注意**不**放行 attr-defined：`agents_config` / `tasks_config` 已在类体内用
+# TYPE_CHECKING 声明，属性名写错仍然应该被抓出来。
+[[tool.mypy.overrides]]
+module = ["amr.crews.market_analyst.crew", "amr.crews.content_creator.crew"]
+disable_error_code = ["call-arg"]
 
 # 第三方库无类型存根：只影响适配层，放行其 import
 [[tool.mypy.overrides]]
