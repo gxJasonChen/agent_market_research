@@ -50,7 +50,7 @@ api / worker  →  services  →  ports  ←  adapters
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| Python | 3.10 – 3.13 | 后端 |
+| Python | 3.12 – 3.13 | 后端 |
 | [uv](https://docs.astral.sh/uv/) | ≥ 0.6 | 依赖管理 |
 | MySQL | 8.x | 作业与事件存储 |
 | Redis | 7.x | Celery broker |

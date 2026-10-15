@@ -109,7 +109,11 @@ def test_create_marks_error_when_enqueue_fails() -> None:
 
 
 def test_finish_error_records_summary() -> None:
-    """TC-U-011 失败收尾：状态 ERROR，result 为错误摘要（REQ-004）。"""
+    """TC-U-011 失败收尾：状态 ERROR，result 是**筛过**的错误摘要（REQ-004 / CT-005）。
+
+    注意与 `test_error_summary.py` 的分工：这里断言状态机行为，
+    那边专门断言「哪些文本允许外流」。
+    """
     service, repo, _, _ = _service()
     job_id, _ = _created(service, repo)
 
@@ -117,7 +121,8 @@ def test_finish_error_records_summary() -> None:
     job = service.finish_error(job_id, RuntimeError("调研阶段失败：工具异常"))
 
     assert job.status is JobStatus.ERROR
-    assert job.result == "调研阶段失败：工具异常"
+    # 外来异常的原文不外流（Codex review M4）：只留类型名，原文在日志里
+    assert job.result == "RuntimeError（详情见服务端日志）"
     assert repo.get(job_id) is not None
     assert repo.get(job_id).status is JobStatus.ERROR  # type: ignore[union-attr]
 

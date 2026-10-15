@@ -44,7 +44,13 @@ class JobRepository(Protocol):
         """
 
     def list_recent(self, limit: int = 20) -> list[Job]:
-        """按 created_at 倒序返回最近的作业（不含 events，避免 N+1）。"""
+        """按 `created_at` 倒序返回最近的作业（不含 events，避免 N+1）。
+
+        排序必须**确定性**：`created_at` 并列时以 `job_id` 升序作为第二键。
+        两个实现各按各的来会让契约测试形同虚设（内存实现依赖 dict 插入序、
+        MySQL 依赖存储引擎的返回顺序，两者都"看起来对"但对不上）。
+        `limit < 1` → 抛 `ValueError`（而不是一个返回空、一个报 SQL 错）。
+        """
 ```
 
 ### 1.1 契约测试要求
@@ -63,6 +69,9 @@ class JobRepository(Protocol):
 | 非法迁移 | `RUNNING → PENDING` 抛 `IllegalTransitionError` |
 | 不存在作业迁移 | 抛 `JobNotFoundError` |
 | 最近列表 | `list_recent` 按 `created_at` 倒序且遵守 `limit` |
+| **占用语义**（TC-C-011） | 传 `expected_from` 而当前状态不符 → `IllegalTransitionError`（`guard="expected_from"`），库中状态不变 |
+| **终态必须带 result**（TC-C-012） | 写 `COMPLETE`/`ERROR` 而 `result is None` → `IllegalTransitionError`（`guard="terminal_requires_result"`），库中状态不变 |
+| **最近列表确定性**（TC-C-013） | `created_at` 并列时按 `job_id` 升序；`limit < 1` → `ValueError`（两个实现必须同语义） |
 
 ---
 

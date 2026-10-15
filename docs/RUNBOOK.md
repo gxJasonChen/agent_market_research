@@ -50,7 +50,12 @@ pkill -f 'uvicorn amr.api.app'
 ```
 
 > 清空待处理队列（**会丢作业，谨慎**）：
-> `redis-cli -n <REDIS_DB> -a '<口令>' FLUSHDB`
+> ```bash
+> export REDISCLI_AUTH="$(grep '^REDIS_PASSWORD' .env | cut -d= -f2- | tr -d ' ')"
+> redis-cli -n <REDIS_DB> FLUSHDB
+> unset REDISCLI_AUTH
+> ```
+> **不要**用 `redis-cli -a '<口令>'` —— 那会把口令写进 shell 历史与 `ps` 输出。
 
 ---
 
@@ -99,12 +104,18 @@ scripts/smoke.sh
 |---|---|---|
 | Worker 在跑吗 | `pgrep -af 'celery -A amr.worker.tasks'` | 没有 → 启动它 |
 | Worker 连上 broker 了吗 | `cd src && ../.venv/bin/python -m celery -A amr.worker.tasks:celery_app inspect ping` | 无响应 → 看 Worker 日志 |
-| 队列里积压吗 | `redis-cli -n <REDIS_DB> -a '<口令>' LLEN celery` | 数字很大 → Worker 太慢或挂了 |
+| 队列里积压吗 | `REDISCLI_AUTH='<口令>' redis-cli -n <REDIS_DB> LLEN celery` | 数字很大 → Worker 太慢或挂了 |
 | Worker 启动就退 | `.artifacts/worker.log` 的 traceback | 多半是依赖缺失或配置读不到 |
 
 ### 5.2 作业变 `ERROR`
 
-直接读 `result` 与 `events`，那里就是错误摘要与逐步产出：
+直接读 `result` 与 `events`：`result` 是**经过筛选的摘要**（本系统自己写的文案 +
+Schema 校验失败的字段名），`events` 是逐步产出。
+
+> 外来异常的**原文不进 `result`**（可能带网关 URL、请求参数甚至密钥），
+> 全文在服务端日志里——排障时两者对着看。
+
+查询：
 
 ```bash
 curl -s http://127.0.0.1:8012/api/crew/<job_id> | python3 -m json.tool
@@ -116,6 +127,7 @@ curl -s http://127.0.0.1:8012/api/crew/<job_id> | python3 -m json.tool
 |---|---|---|
 | `Schema` 字样 | 模型输出不符合 Schema（字段缺失/类型错） | 看错误里点名的 `strategy.tactics` 之类字段；必要时收紧/放宽 Prompt |
 | `FlowExecutionError` + 工具名 | 检索工具不可用（Serper 配额/密钥） | 检查 `SERPER_API_KEY` 与配额 |
+| `RuntimeError（详情见服务端日志）` 之类 | 外来异常，原文在日志里 | 查 Worker 日志里对应的 job_id |
 | 模型网关超时/鉴权 | 网关地址或密钥不对 | 检查 `OPENAI_*` 配置 |
 | `任务队列不可用` | 提交时 broker 不可达 | 起 Redis；作业已被置 ERROR，需重新提交 |
 
@@ -123,19 +135,45 @@ curl -s http://127.0.0.1:8012/api/crew/<job_id> | python3 -m json.tool
 > 这是刻意设计——源项目那个「失败作业被误报成功」的严重缺陷就是这么来的。
 > 重跑请**重新提交**，不要试图改历史作业的状态。
 
-### 5.3 提交返回 503
+### 5.3 作业卡在 `RUNNING` 不动
+
+**先跑回收脚本看看**（默认 dry-run，只打印不改）：
+
+```bash
+.venv/bin/python scripts/reap_stuck_jobs.py --older-than 60          # 看有哪些
+.venv/bin/python scripts/reap_stuck_jobs.py --older-than 60 --apply  # 确认后回收
+```
+
+脚本会把超时仍非终态的作业标成 `ERROR` 并写明原因。
+
+**为什么会卡住**：`PENDING` 侧有「入队失败即置 ERROR」的防护，`RUNNING` 侧没有——
+执行器对**暂时性**存储故障会重试收尾写入（`services/orchestrator.py::_finalize`，默认 3 次），
+重试耗尽后（比如数据库长时间不可用）只能靠这个脚本兜底。
+
+**为什么重试「写入」而不重跑整条 Flow**：结果已经在手里，重试写入是毫秒级动作；
+重跑一遍要再烧一遍 token，两者代价差几个数量级。
+
+相关配置（`src/amr/worker/tasks.py`）：
+
+| 配置 | 值 | 作用 |
+|---|---|---|
+| `broker_transport_options.visibility_timeout` | 6 小时 | 小于它，长 Flow 会被误判为「消息丢了」而重投 |
+| `task_soft_time_limit` / `task_time_limit` | 45 / 50 分钟 | Flow 挂死时把 Worker 槽位收回来 |
+| `kickoff_flow` 的 `max_retries` | 3（间隔 30s） | 只针对存储**暂时**不可用；不重跑整条 Flow |
+
+### 5.4 提交返回 503
 
 | detail | 原因 | 处理 |
 |---|---|---|
 | `任务队列不可用` | Redis 不可达 | 起 Redis，检查 `REDIS_*` 与口令特殊字符 |
 | `存储不可用` | MySQL 不可达 | 起 MySQL，检查 `MYSQL_*`；确认库已建 |
 
-### 5.4 提交返回 422
+### 5.5 提交返回 422
 
 入参不合规。规则见 [`spec/020 §3`](../spec/020-contracts-domain.md)：
 `customer_domain` 3–255 字符、`project_description` 10–4000 字符，两者都会先去掉首尾空白再判长度。
 
-### 5.5 前端连不上后端
+### 5.6 前端连不上后端
 
 - 开发环境走 Vite proxy（`/api` → `127.0.0.1:8012`），**不需要**改后端 CORS；
 - 直连时设 `VITE_API_BASE`，并把来源加进 `AMR_CORS_ORIGINS`。

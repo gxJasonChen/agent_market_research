@@ -24,6 +24,7 @@ dev = [
     "pytest>=8.2",
     "pytest-cov>=5.0",
     "ruff>=0.6",
+    "pyyaml>=6.0",  # tests/unit/test_crews_config.py 直接解析 YAML
 ]
 
 [build-system]

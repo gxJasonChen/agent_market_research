@@ -45,10 +45,6 @@ __all__ = ["MySQLJobRepository"]
 
 logger = logging.getLogger(__name__)
 
-#: `datetime.UTC` 是 3.11 才有的；本项目 `requires-python >= 3.10`，
-#: 这里用等价的 `timezone.utc`（语义相同，且在 3.10 上可用）。
-UTC = UTC
-
 #: ER_DUP_ENTRY。端口契约要求「重复 create」表现为 `ValueError`，不是存储故障。
 _ER_DUP_ENTRY = 1062
 
@@ -96,9 +92,12 @@ _SELECT_RECENT = (
 
 #: 第二层防护。终态集合直接写在这条语句里是有意的：**判定必须与写入是同一条语句**，
 #: 「先查再写」之间必然存在窗口（spec/021 §1 把这条 SQL 写死在契约里）。
+#: `AND (%s IS NULL OR status = %s)` 是**占用语义**：调用方给了 expected_from 时，
+#: 只有状态仍是它才写。这样 `_read_status` 读到过期快照也不会误写。
 _UPDATE_STATUS = (
     "UPDATE jobs SET status=%s, result=COALESCE(%s, result), updated_at=%s"
     " WHERE job_id=%s AND status NOT IN ('COMPLETE','ERROR')"
+    " AND (%s IS NULL OR status = %s)"
 )
 
 
@@ -204,13 +203,24 @@ class MySQLJobRepository:
         *,
         result: str | None = None,
         at: datetime,
+        expected_from: JobStatus | None = None,
     ) -> Job:
         """状态迁移，返回迁移后的作业快照（含事件）。
 
         - 作业不存在 → `JobNotFoundError`
         - 迁移非法（含写入终态）→ `IllegalTransitionError`，库中状态保持不变
+        - `expected_from` 与当前状态不符 → `IllegalTransitionError`（占用语义）
+        - 写终态但 `result` 为空 → `IllegalTransitionError`（源项目「假成功」的症状形状）
         - 同一非终态重复写入 → 幂等成功（`result` 传入时才更新）
         """
+        # 先按域名规则挡住「写终态却没有结果」——这正是源项目假成功的形状，
+        # 不能指望每个调用方都记得传 result（仓储是最后一道，不是唯一一道）
+        if is_terminal(to) and result is None:
+            raise IllegalTransitionError(
+                "写入终态必须带 result",
+                context={"job_id": job_id, "to": to.value, "guard": "terminal_requires_result"},
+            )
+
         self.ensure_schema()
         connection = self._connect()
         try:
@@ -223,12 +233,29 @@ class MySQLJobRepository:
                         "非法的状态迁移",
                         context={"job_id": job_id, "from": current.value, "to": to.value},
                     )
+                if expected_from is not None and current is not expected_from:
+                    raise IllegalTransitionError(
+                        "状态与预期不符，迁移作废",
+                        context={
+                            "job_id": job_id,
+                            "from": current.value,
+                            "to": to.value,
+                            "expected_from": expected_from.value,
+                            "guard": "expected_from",
+                        },
+                    )
 
-                cursor.execute(_UPDATE_STATUS, (to.value, result, _to_db(at), job_id))
+                expected = expected_from.value if expected_from is not None else None
+                cursor.execute(
+                    _UPDATE_STATUS,
+                    (to.value, result, _to_db(at), job_id, expected, expected),
+                )
                 if cursor.rowcount == 0:
                     self._raise_if_blocked(cursor, job_id, to)
 
-                updated = self._read_job(cursor, job_id)
+                # 用**锁定读**取返回快照：普通一致性读在 REPEATABLE READ 下看的是事务开始时的
+                # 快照，并发刚提交的终态它看不见，会把过期状态当结果返回给调用方。
+                updated = self._read_job(cursor, job_id, for_update=True)
                 if updated is None:  # 两次读之间被删：宁可报「不存在」也不返回幽灵快照
                     raise JobNotFoundError("作业不存在，无法迁移状态", context={"job_id": job_id})
             connection.commit()
@@ -239,7 +266,15 @@ class MySQLJobRepository:
             connection.close()
 
     def list_recent(self, limit: int = 20) -> list[Job]:
-        """按 `created_at` 倒序返回最近作业（不带事件，避免 N+1 查询）。"""
+        """按 `created_at` 倒序返回最近作业（不带事件，避免 N+1 查询）。
+
+        `limit < 1` 直接抛 `ValueError`：否则 `LIMIT -1` 会变成一条 SQL 错误，
+        被包装成 `RepositoryUnavailableError` → 503，把「调用方传错参数」
+        伪装成「存储不可用」。两个实现必须同语义（spec/021 §1）。
+        """
+        if limit < 1:
+            raise ValueError(f"limit 必须大于 0，收到 {limit}")
+
         self.ensure_schema()
         connection = self._connect()
         try:
@@ -288,8 +323,16 @@ class MySQLJobRepository:
         row = MySQLJobRepository._fetch_row(cursor)
         return None if row is None else JobStatus(str(row[0]))
 
-    def _read_job(self, cursor: MySQLCursorAbstract, job_id: str) -> Job | None:
-        cursor.execute(_SELECT_JOB, (job_id,))
+    def _read_job(
+        self, cursor: MySQLCursorAbstract, job_id: str, *, for_update: bool = False
+    ) -> Job | None:
+        """读作业快照。`for_update=True` 用锁定读拿**最新已提交**版本。
+
+        为什么需要这个开关：REPEATABLE READ 下普通一致性读看的是事务开始时的快照，
+        并发刚提交的状态它看不见。`transition` 刚做完条件更新，若再用普通读取返回值，
+        可能把一个已过期的状态当结果交给调用方。
+        """
+        cursor.execute(f"{_SELECT_JOB} FOR UPDATE" if for_update else _SELECT_JOB, (job_id,))
         row = self._fetch_row(cursor)
         if row is None:
             return None

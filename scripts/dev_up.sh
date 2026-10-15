@@ -43,7 +43,8 @@ start() {
       >"${ARTIFACTS}/worker.log" 2>&1 & echo $! >"${ARTIFACTS}/worker.pid" )
 
   echo "[dev_up] 启动 FastAPI（:${PORT}）"
-  "${PY}" -m uvicorn amr.api.app:app --host 0.0.0.0 --port "${PORT}" --app-dir "${ROOT}/src" \
+  # --factory：ASGI 入口是工厂函数，避免 import 期就读取 .env（见 src/amr/api/app.py 末尾注释）
+  "${PY}" -m uvicorn amr.api.app:create_app --factory --host 0.0.0.0 --port "${PORT}" --app-dir "${ROOT}/src" \
     >"${ARTIFACTS}/api.log" 2>&1 &
   echo $! >"${ARTIFACTS}/api.pid"
 

@@ -55,12 +55,20 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | TC-U-023 | 架构守护：`domain` 零外部依赖 | NFR-004 | `domain/**` 只允许标准库 + pydantic；扫描器自身有用例证明不是「永远通过」 |
 | TC-U-024 | 装配点按 `AMR_LLM_PROVIDER` 分派执行器 | REQ-008 | `fake` → `FakeFlowRunner`；真实供应商缺配置时**装配期**就报错，不拖到首次调用 |
 | TC-U-025 | 装配不触网 | REQ-009 | 构造仓储不连库（给一个不可达地址也必须构造成功）；Worker 侧队列一用就报错 |
+| TC-U-026 | 错误摘要的外流边界 | REQ-011 | 自己写的文案保留；外来异常只留类型名，URL/`sk-`/口令等一律不外流（CT-005） |
+| TC-U-027 | CrewAI 产出 → 结构化模型 | REQ-006 | `pydantic` 直用 / 退回解析 `raw` / 两条都失败抛 `SchemaValidationError` 且点名字段 |
+| TC-U-028 | 配置真的生效 | REQ-009/013 | `AMR_LOG_LEVEL` 落到 logger；Traces 开关导出到进程环境；Redis 口令特殊字符编码；DB 连接有超时 |
+| TC-U-029 | 队列异常翻译 | REQ-011 | 任务未注册 / broker 异常 → `QueueUnavailableError`，且异常与日志都不带连接串 |
+| TC-U-030 | 占用语义与收尾重试 | REQ-002/004 | `RUNNING` 中重复投递**不再重跑 Flow**；收尾写库的暂时性故障被重试吸收，耗尽后抛出 |
 
 ### 2.2 契约层
 
 | 编号 | 用例 | 守护 | 说明 |
 |---|---|---|---|
 | TC-C-001..010 | `021` §1.1 的 10 组 | REQ-004/005 | 参数化跑 `MemoryJobRepository` 与 `MySQLJobRepository`，**同一套断言** |
+| TC-C-011 | 占用语义 `expected_from` | REQ-002 | 认领失败 → `IllegalTransitionError`，`guard="expected_from"`；首次认领正常通过 |
+| TC-C-012 | 写终态必须带 `result` | REQ-004 | 缺 `result` 写终态被拒且库中状态不变；返回值是**新快照**不是过期读 |
+| TC-C-013 | `list_recent` 语义 | REQ-003 | 倒序 + 遵守 limit；`created_at` 并列按 `job_id` 升序；`limit < 1` 抛 `ValueError` |
 
 > 契约层是「两个实现语义一致」的保证。MySQL 实现里那句「终态不可变」的条件 UPDATE 只有在真实数据库上才验得出来，所以这一层必须连真库。
 
@@ -81,6 +89,7 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | TC-I-011 | `/healthz` | REQ-014 | 200 + `status=ok` |
 | TC-I-012 | 错误体不泄露内部信息 | REQ-011 | 触发 500 的响应体不含 `Traceback`/`mysql`/密码字样 |
 | TC-I-013 | Worker eager 模式跑通任务体 | REQ-002 | Celery `task_always_eager` 下 `kickoff_flow` 正确推进状态 |
+| TC-I-014 | 生产装配路径 | REQ-009/011/014 | `create_app()` **无参**调用（uvicorn 真实入口）装配出 MySQL/Celery 实现且不需要外部系统；`/healthz` 在中间件全不可达时仍 200；存储不可用 → 503 |
 
 ### 2.4 系统层
 
@@ -99,18 +108,18 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | REQ | 单元 | 契约 | 集成 | 系统 |
 |---|---|---|---|---|
 | REQ-001 提交作业 | TC-U-009 | — | TC-I-001, TC-I-002 | TC-S-001 |
-| REQ-002 异步执行 | TC-U-015 | — | TC-I-013 | TC-S-001 |
+| REQ-002 异步执行 | TC-U-015, TC-U-030 | TC-C-011 | TC-I-013 | TC-S-001 |
 | REQ-003 查询作业 | TC-U-014 | TC-C-001 | TC-I-004, TC-I-005 | TC-S-001 |
-| REQ-004 状态机 | TC-U-001~004, 012, 013, 015 | TC-C-006~009 | TC-I-009 | TC-S-002 |
-| REQ-005 事件流水 | TC-U-016 | TC-C-004 | TC-I-010 | TC-S-001 |
-| REQ-006 结构化输出 | TC-U-007, 008, 018 | — | TC-I-008 | TC-S-001, TC-S-004 |
+| REQ-004 状态机 | TC-U-001~004, 012, 013, 015, 030 | TC-C-006~009, 012 | TC-I-009 | TC-S-002 |
+| REQ-005 事件流水 | TC-U-016, TC-U-027 | TC-C-004 | TC-I-010 | TC-S-001 |
+| REQ-006 结构化输出 | TC-U-007, 008, 018, 027 | — | TC-I-008 | TC-S-001, TC-S-004 |
 | REQ-007 双 Crew 编排 | TC-U-017, 019 | — | TC-I-008 | TC-S-001, TC-S-004 |
 | REQ-008 多供应商 | TC-U-021, TC-U-024 | — | — | TC-S-004 |
 | REQ-009 配置安全 | TC-U-020, TC-U-025 | — | TC-I-012 | TC-S-003 |
 | REQ-010 输入校验 | TC-U-005, 006 | — | TC-I-003 | TC-S-001 |
-| REQ-011 错误语义 | TC-U-010 | — | TC-I-006, 007, 012 | — |
+| REQ-011 错误语义 | TC-U-010, TC-U-026, TC-U-029 | — | TC-I-006, 007, 012, 014 | — |
 | REQ-012 前端控制台 | — | — | — | TC-S-005 + 前端 vitest：`useJobPolling.spec.ts`（轮询间隔与停止规则）、`crew.spec.ts`（CT-001/002/005）、`result.spec.ts`（result 形状容错）、`url.spec.ts`（job_id 回填）、`App.spec.ts`（首屏与徽章） |
-| REQ-013 可观测性 | — | — | TC-I-010 | TC-S-001 |
+| REQ-013 可观测性 | TC-U-028 | — | TC-I-010 | TC-S-001 |
 | REQ-014 健康检查 | — | — | TC-I-011 | TC-S-003 |
 | NFR-001 离线可跑 | 全部（CI 在无密钥环境执行） | | | |
 | NFR-004 分层依赖 | TC-U-022, 023 | | | |

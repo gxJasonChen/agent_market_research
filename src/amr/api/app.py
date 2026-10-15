@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 import amr
 from amr.api.deps import build_dependencies, install_dependencies
 from amr.api.routes import router
-from amr.config import Settings, get_settings
+from amr.config import Settings, configure_logging, export_third_party_env, get_settings
 from amr.domain.errors import (
     AmrError,
     InvalidInputError,
@@ -30,7 +30,7 @@ from amr.ports.clock import Clock, IdGenerator
 from amr.ports.queue import TaskQueue
 from amr.ports.repository import JobRepository
 
-__all__ = ["JsonResponse", "create_app", "app"]
+__all__ = ["JsonResponse", "create_app"]
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,8 @@ def create_app(
     `uvicorn amr.api.app:app` 在启动时执行，那一刻不该连 MySQL、也不该加载 celery。
     """
     resolved = settings if settings is not None else get_settings()
+    configure_logging(resolved)
+    export_third_party_env(resolved)
 
     application = FastAPI(
         title="多智能体市场调研与营销内容生成",
@@ -146,5 +148,10 @@ _HANDLERS: dict[type[Exception], Callable[[Request, Exception], Awaitable[JsonRe
 }
 
 
-#: ASGI 入口（`uvicorn amr.api.app:app` / Makefile / 系统测试都按这个名字找）
-app = create_app()
+# 刻意**不**在模块级调用 `create_app()`。
+#
+# 那样做的话，`import amr.api.app` 这个动作本身就会读取 `.env`：任何一个取值非法
+# （`MYSQL_PORT=abc`、`AMR_LLM_PROVIDER=xxx`）都会让 import 直接抛 ValidationError，
+# 影响面远不止真实进程——测试收集、文档工具、任何一次误 import 都会炸。
+#
+# 因此 ASGI 入口用工厂模式：`uvicorn amr.api.app:create_app --factory`。

@@ -49,6 +49,9 @@ jobs:
       MYSQL_DATABASE: amr_test
       # CI 不碰真实模型网关；AMR_LLM_PROVIDER 缺省即 openai，但没有任何测试会真的调用它
       AMR_LOG_LEVEL: WARNING
+      # 契约层的 MySQL 半边在 CI 里**必须真跑**：连不上就失败，而不是 skip。
+      # 否则 service 起不来时门禁照样绿，而「终态防护只有真库才验得出来」就悄悄失效了。
+      AMR_REQUIRE_MYSQL: "1"
 
     steps:
       - uses: actions/checkout@v4

@@ -128,9 +128,11 @@ class CrewAIFlowRunner:
             raise
         except Exception as exc:
             logger.exception("Flow 执行失败 job_id=%s", job_id)
+            # 只带**结构化**信息进 context：它会经 AmrError.__str__ 进 result 回给调用方，
+            # 而下游异常的原文可能带网关 URL、请求参数甚至密钥——原文只进日志（CT-005）
             raise FlowExecutionError(
                 f"流程执行失败：{type(exc).__name__}",
-                context={"job_id": job_id, "reason": str(exc)[:200]},
+                context={"job_id": job_id},
             ) from exc
 
         if flow.result is None:  # pragma: no cover —— 只有 Flow 被中断才会走到

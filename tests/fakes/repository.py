@@ -55,9 +55,10 @@ class RecordingJobRepository:
         *,
         result: str | None = None,
         at: datetime,
+        expected_from: JobStatus | None = None,
     ) -> Job:
         # 只在**成功**后记录，失败的迁移不该出现在序列里
-        job = self._inner.transition(job_id, to, result=result, at=at)
+        job = self._inner.transition(job_id, to, result=result, at=at, expected_from=expected_from)
         self.calls.append(("transition", (job_id, to), {"result": result, "at": at}))
         return job
 

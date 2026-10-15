@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from amr.domain.errors import JobNotFoundError, QueueUnavailableError
+from amr.domain.errors import AmrError, JobNotFoundError, QueueUnavailableError
 from amr.domain.inputs import CrewInputs
 from amr.domain.models import FlowResult, Job
 from amr.domain.status import JobStatus
@@ -102,8 +102,22 @@ class JobService:
     # ------------------------------------------------------------ 状态迁移
 
     def mark_running(self, job_id: str) -> Job:
-        """`PENDING → RUNNING`。作业已在终态时抛 `IllegalTransitionError`。"""
-        job = self._repository.transition(job_id, JobStatus.RUNNING, at=self._clock.now())
+        """`PENDING → RUNNING`，带走**占用语义**（REQ-002）。
+
+        `expected_from=PENDING` 是关键：队列是 at-least-once 的，Worker 被 kill / 与 broker
+        掉线后消息会被重投。没有这个约束的话，第二次投递会把作业从 `RUNNING` 再"迁到"
+        `RUNNING`（domain 层把这个当幂等，是真值表允许的），于是**整条 Flow 再跑一遍**——
+        双倍 token、两套 Agent、事件交错写进同一个作业。
+
+        作业已在终态或已被别的 Worker 占用时抛 `IllegalTransitionError`，
+        由执行器安静跳过（见 spec/021 §3.1）。
+        """
+        job = self._repository.transition(
+            job_id,
+            JobStatus.RUNNING,
+            at=self._clock.now(),
+            expected_from=JobStatus.PENDING,
+        )
         self._emit(job_id, EVENT_RUNNING)
         return job
 
@@ -123,8 +137,18 @@ class JobService:
         return job
 
     def finish_error(self, job_id: str, error: BaseException | str) -> Job:
-        """`* → ERROR`，把错误摘要写进 `result` 供调用方排查。"""
-        summary = str(error) or type(error).__name__
+        """`* → ERROR`，把**经过筛选**的错误摘要写进 `result`（REQ-004 / CT-005）。
+
+        摘要不是 `str(error)`——`result` 会原样回给调用方，而下游异常的原文可能带
+        网关 URL、请求参数甚至密钥。规则是：
+
+        - 本系统自己的异常（`AmrError`）：用它**由我们写的** `message`，
+          外加白名单字段（如 Schema 校验失败的字段名）；
+        - 其它异常：只给**类型名**，原文只进日志。
+
+        这样调用方拿到的信息足够定位「哪一类失败」，又不至于把内部细节泄出去。
+        """
+        summary = _safe_summary(error)
         job = self._repository.transition(
             job_id,
             JobStatus.ERROR,
@@ -140,3 +164,22 @@ class JobService:
         # publisher 是必填依赖：REQ-005 要求每次状态变更都有事件，
         # 做成可选参数只会让「事件被静默丢弃」变成一种可能性
         self._publisher.publish(job_id, data)
+
+
+def _safe_summary(error: BaseException | str) -> str:
+    """生成允许写进 `result`（因而会回给调用方）的错误摘要。
+
+    见 `finish_error` 的说明：只有本系统自己写的文案才允许外流，
+    外来异常的原文一律留在服务端日志里。
+    """
+    if isinstance(error, str):
+        return error or "未知错误"
+
+    if isinstance(error, AmrError):
+        fields = error.context.get("fields")
+        if isinstance(fields, (list, tuple)) and fields:
+            return f"{error.message}（字段：{', '.join(str(item) for item in fields)}）"
+        return error.message or type(error).__name__
+
+    # 外来异常：类型名足够定位方向，原文（可能含 URL / 凭据 / 请求参数）不外流
+    return f"{type(error).__name__}（详情见服务端日志）"

@@ -201,8 +201,13 @@ CREATE TABLE IF NOT EXISTS events (
 
 - **事件流水**：每次状态变更与每个 Task 的产出都落 `events` 表，按时间正序可查。
   排查「Agent 在哪一步跑偏」时，先看这个，比加 `print` 有效。
-- **日志**：结构化，带 `job_id`。`AMR_LOG_LEVEL` 控制级别。
-- **CrewAI Traces**：设 `CREWAI_TRACING_ENABLED=true` 开启，可下钻到 Agent 决策、工具调用参数与 Token 消耗。
+- **日志**：键值文本格式，带 `job_id`。`AMR_LOG_LEVEL` 由装配点
+  （`api/app.py::create_app`、`worker/tasks.py`）统一调用 `config.configure_logging` 生效。
+- **CrewAI Traces**：设 `CREWAI_TRACING_ENABLED=true` 开启，可下钻到 Agent 决策、
+  工具调用参数与 Token 消耗。它由 `config.export_third_party_env` 导出成**进程环境变量**——
+  pydantic-settings 只把 `.env` 读进 `Settings`，**不会**写进 `os.environ`，而 crewai 是从环境变量读的。
+- **ASGI 入口是工厂**：`uvicorn amr.api.app:create_app --factory`。不在模块级 `create_app()`，
+  是为了让 `import amr.api.app` 不读 `.env`——配置里任何一个值写错都不该让 import 本身炸掉。
 
 ---
 

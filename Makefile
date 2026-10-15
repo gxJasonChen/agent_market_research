@@ -40,7 +40,7 @@ test-system: ## 系统测试：需真实 MySQL/Redis，真实网关用 --run-rea
 	$(PY) -m pytest tests/system -m system
 
 run-api: ## 本地启动 API（前台）
-	$(PY) -m uvicorn amr.api.app:app --host 0.0.0.0 --port $${AMR_API_PORT:-8012} --app-dir src
+	$(PY) -m uvicorn amr.api.app:create_app --factory --host 0.0.0.0 --port $${AMR_API_PORT:-8012} --app-dir src
 
 run-worker: ## 本地启动 Celery Worker（前台）
 	cd src && ../$(PY) -m celery -A amr.worker.tasks:celery_app worker --loglevel=info --concurrency=2

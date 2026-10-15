@@ -113,30 +113,29 @@ def test_oneapi_provider_builds_a_model() -> None:
     assert build_llm_provider(settings).build().model == "qwen-max"
 
 
-def test_ollama_provider_builds_a_model_and_sets_openai_placeholder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TC-U-021 ollama 分支：本地推理没有真 key，需要给 crewai 一个占位值（REQ-008）。"""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def test_ollama_provider_builds_a_model() -> None:
+    """TC-U-021 ollama 分支可以构造出模型对象（REQ-008）。
+
+    OPENAI_API_KEY 占位值由 `config.export_third_party_env` 在装配点统一设置，
+    适配器本身不再有全局副作用（其行为由 tests/unit/test_config.py 覆盖）。
+    """
     settings = _settings(llm_provider="ollama", ollama_model_name="llama3.1:latest")
 
-    model = build_llm_provider(settings).build()
+    assert build_llm_provider(settings).build().model == "llama3.1:latest"
 
-    assert model.model == "llama3.1:latest"
+
+def test_llm_factory_has_no_global_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TC-U-021 适配器不得改动进程环境（spec/000 §5）。
+
+    这类副作用搬去装配点后，适配层才谈得上「无状态、可反复构造」。
+    """
     import os
 
-    assert os.environ["OPENAI_API_KEY"] == "NA"
-
-
-def test_ollama_does_not_override_an_existing_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """TC-U-021 补充：占位值用 `setdefault`，不覆盖用户显式配置的真实 key（REQ-008）。"""
-    monkeypatch.setenv("OPENAI_API_KEY", "user-real-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     build_llm_provider(_settings(llm_provider="ollama")).build()
 
-    import os
-
-    assert os.environ["OPENAI_API_KEY"] == "user-real-key"
+    assert "OPENAI_API_KEY" not in os.environ
 
 
 def test_fake_provider_refuses_to_build_a_model() -> None:

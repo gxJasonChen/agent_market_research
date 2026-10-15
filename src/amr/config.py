@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote_plus
@@ -15,7 +17,14 @@ from urllib.parse import quote_plus
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__ = ["LLMProviderName", "Settings", "PROJECT_ROOT", "get_settings"]
+__all__ = [
+    "PROJECT_ROOT",
+    "LLMProviderName",
+    "Settings",
+    "configure_logging",
+    "export_third_party_env",
+    "get_settings",
+]
 
 #: 仓库根目录（src/amr/config.py → parents[2]）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -107,9 +116,51 @@ class Settings(BaseSettings):
             "user": self.mysql_user,
             "password": self.mysql_password,
             "database": self.mysql_database,
+            # 显式超时：DB 被黑洞（DROP 而非 REJECT）时，没有超时会让请求一直挂着，
+            # 而路由是同步 def（跑在线程池里），少量挂起就能把线程池占满
+            "connect_timeout": 5,
+            "read_timeout": 10,
+            "write_timeout": 10,
         }
 
 
 def get_settings() -> Settings:
     """读取配置。测试里请直接构造 `Settings(...)`，不要依赖真实 `.env`。"""
     return Settings()
+
+
+def configure_logging(settings: Settings) -> None:
+    """按配置初始化根日志（REQ-013）。
+
+    在此之前 `AMR_LOG_LEVEL` 是个没人读的字段——文档让用户去设，设了却没有效果，
+    这种「死配置」比没有配置更糟。
+
+    格式是**键值文本**而不是 JSON：这套系统的日志主要给人看（排障时 `grep job_id=`），
+    真要接采集器再换成 JSON 也不影响调用方。
+    """
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        force=True,  # 覆盖第三方库可能已经装上的 handler，否则配置会被无声忽略
+    )
+
+
+def export_third_party_env(settings: Settings) -> None:
+    """把 `Settings` 里的开关导出成第三方库能读到的**进程环境变量**。
+
+    为什么需要这一步：pydantic-settings 只把 `.env` 读进 `Settings` 对象，
+    **不会**把它写进 `os.environ`；而 crewai 这类库是从进程环境变量读配置的。
+    不导出的话，用户按文档在 `.env` 里设了 `CREWAI_TRACING_ENABLED=true` 也毫无效果
+    （这是一处会把人带偏的「死配置」）。
+
+    把这类「适配第三方期望」的全局副作用**集中在这一个函数**，而不是散落在
+    各适配器的 `build()` 里——适配层保持无副作用，测试里也只需要显式调这一次。
+    """
+    if settings.crewai_tracing_enabled:
+        # crewai 自己在 import/构造时读这个变量
+        os.environ["CREWAI_TRACING_ENABLED"] = "true"
+
+    if settings.llm_provider == "ollama":
+        # crewai 内部仍会读 OPENAI_API_KEY；本地推理没有真 key，给个占位值避免它报错。
+        # 用 setdefault 而不是赋值：不覆盖用户显式配置的真实 key。
+        os.environ.setdefault("OPENAI_API_KEY", "NA")

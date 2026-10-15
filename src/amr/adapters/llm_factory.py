@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from amr.config import Settings
@@ -90,9 +89,8 @@ class SettingsLLMProvider:
         from crewai import LLM
 
         s = self._settings
-        # crewai 内部仍会读 OPENAI_API_KEY；本地推理没有真 key，给个占位值避免它报错。
-        # 用 setdefault 而不是直接赋值：不覆盖用户显式配置的真实 key。
-        os.environ.setdefault("OPENAI_API_KEY", "NA")
+        # OPENAI_API_KEY 占位值由 config.export_third_party_env 在装配点统一处理，
+        # 适配器不再有全局副作用（spec/000 §5）
         logger.info("使用本地 Ollama provider=ollama model=%s", s.ollama_model_name)
         return LLM(
             base_url=s.ollama_api_base,

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Iterator
 
@@ -74,14 +75,20 @@ def _reset_tables(settings: Settings) -> None:
 
 
 def _prepare_database() -> Settings:
-    """建测试库并返回配置。MySQL 不可用（连不上 / 无权限）时跳过本参数。"""
+    """建测试库并返回配置。MySQL 不可用（连不上 / 无权限）时跳过本参数。
+
+    `AMR_REQUIRE_MYSQL=1` 时**不跳过而是失败**：本地开发跳过是合理的（NFR-001 要求
+    离线可跑），但在 CI 里跳过是危险的——service 起不来时门禁照样绿，
+    而「条件 UPDATE 的终态防护只有在真库上才验得出来」这句就悄悄失效了。
+    """
     settings = _test_settings()
     try:
         _create_database(settings)
     except mysql.connector.Error as exc:
-        pytest.skip(
-            f"MySQL 不可用，跳过契约测试的 MySQL 半边：{type(exc).__name__} errno={exc.errno}"
-        )
+        message = f"MySQL 不可用：{type(exc).__name__} errno={exc.errno}"
+        if os.getenv("AMR_REQUIRE_MYSQL") == "1":
+            pytest.fail(f"{message}（AMR_REQUIRE_MYSQL=1，不允许跳过）")
+        pytest.skip(f"{message}，跳过契约测试的 MySQL 半边")
     return settings
 
 

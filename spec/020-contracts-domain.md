@@ -150,6 +150,9 @@ class CrewInputs(BaseModel):
 
 - 两个字段在 `mode="before"` 校验器中 `strip()` 首尾空白；strip 后再判长度。
 - 纯空白字符串视为空 → 校验失败。
+- **`extra="forbid"`**：请求体里出现未定义字段一律 422，不静默忽略——一个拼错的
+  `customer_domian` 应该是显式错误，而不是「提交成功但调研方向为空」。这是**对外的收紧**，
+  属于契约的一部分。
 - 失败时抛 pydantic 的 `ValidationError`；HTTP 层翻译为 `422`（`022` §4），CrewAI 层不关心。
 
 `CrewInputs` 是**输入校验的单一事实来源**：HTTP 层直接用它做请求体模型，不在路由里另写规则。

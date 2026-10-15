@@ -80,7 +80,7 @@ curl -s -X POST http://127.0.0.1:8012/api/crew \
 |---|---|---|
 | `job_id` | string | 回显 |
 | `status` | string | 见 `020` §1.1；**新增状态不视为破坏性变更**（前端须按字符串容错） |
-| `result` | object \| null \| string | `COMPLETE` → 结构化对象（形状见 `020` §2.3）；`ERROR` → 错误摘要字符串；`PENDING`/`RUNNING` → `null` |
+| `result` | object \| null \| string | `COMPLETE` → 结构化对象（形状见 `020` §2.3）；`ERROR` → **经过筛选**的错误摘要；`PENDING`/`RUNNING` → `null` |
 | `events` | array | 按 `timestamp` **正序**（最早在前）；每项 `{timestamp, data}` |
 
 **语义保证**
@@ -121,6 +121,11 @@ curl -s http://127.0.0.1:8012/api/crew/<job_id> | jq
 
 ## CT-005 错误体形状
 
+- `ERROR` 作业的 `result` 是**筛选过的摘要**，不是异常原文：
+  本系统自己写的文案（`AmrError.message`）与白名单字段（如 Schema 校验失败的字段名）可以外流；
+  外来异常只给**类型名**加「详情见服务端日志」，原文（可能带网关 URL、请求参数、密钥）只进日志。
+- 边界情况：`COMPLETE` 但 `result` 解析不出结构化对象时返回 `null` 并记 ERROR 日志——
+  **不拿裸文本冒充结构化结果**（这是防御，不是正常路径）。
 - 业务错误统一 `{"detail": "<人类可读信息>"}`。
 - 校验错误沿用 FastAPI 默认的 `{"detail": [...]}` 数组形状，前端按 `detail` 存在性判断即可。
 - **任何**响应都不得包含：堆栈、SQL、连接串、密钥、模型 API 错误原文（可保留错误类型与摘要）。

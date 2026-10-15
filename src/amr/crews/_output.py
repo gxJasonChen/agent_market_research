@@ -15,13 +15,26 @@ from amr.domain.errors import SchemaValidationError
 __all__ = ["output_text", "structured_output"]
 
 
+#: 依次尝试的文本属性。CrewAI 换版本时字段名会变，与其在调用点到处写 getattr，
+#: 不如把「哪里能取到文本」集中在这里。
+_TEXT_ATTRS = ("raw", "output", "answer", "text", "content")
+
+
 def output_text(output: Any) -> str:
-    """取任务产出的文本形式，用于写事件流水。"""
-    raw = getattr(output, "raw", None)
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    text = str(output).strip()
-    return text or "(空产出)"
+    """取任务产出的文本形式，用于写事件流水（REQ-005）。
+
+    事件流水是给人排障看的，所以这里刻意**不**退回 `repr()`——`namespace(raw='…')`
+    这种字符串在流水里毫无价值，不如老实说「空产出」。
+    """
+    for attr in _TEXT_ATTRS:
+        value = getattr(output, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    if isinstance(output, str) and output.strip():
+        return output.strip()
+
+    return "(空产出)"
 
 
 def structured_output[ModelT: BaseModel](output: Any, model: type[ModelT]) -> ModelT:

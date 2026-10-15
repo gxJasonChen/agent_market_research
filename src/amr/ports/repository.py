@@ -42,6 +42,7 @@ class JobRepository(Protocol):
         *,
         result: str | None = None,
         at: datetime,
+        expected_from: JobStatus | None = None,
     ) -> Job:
         """状态迁移，返回迁移后的作业快照。
 
@@ -49,6 +50,13 @@ class JobRepository(Protocol):
         - 迁移非法（含写入终态）→ `IllegalTransitionError`，**且库中状态保持不变**
         - 同一非终态重复写入 → 幂等成功（`result` 若传入则更新）
         - 存储不可用 → `RepositoryUnavailableError`
+        - 传了 `expected_from` 而当前状态不符 → `IllegalTransitionError`
+          （context 带 `guard="expected_from"`）。这是**占用语义**：把「读到什么就写什么」
+          收紧成「只有在状态仍是 X 时才写」。`PENDING → RUNNING` 用它来做「认领」，
+          避免重复投递把整条 Flow 再跑一遍（REQ-002）。
+
+        **写入终态时必须带 `result`**：`COMPLETE` 而 `result` 为空正是源项目
+        「假成功」的症状形状，仓储层直接拒绝，不指望调用方自觉（REQ-004）。
 
         实现必须在存储层再做一次并发防护（MySQL：条件 UPDATE + affected rows 校验），
         否则两个 Worker 并发收尾时，终态仍可能被覆盖（REQ-004）。

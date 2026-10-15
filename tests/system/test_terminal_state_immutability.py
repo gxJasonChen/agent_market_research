@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -19,6 +20,9 @@ from amr.config import Settings
 from amr.domain.errors import IllegalTransitionError
 from amr.domain.models import Job
 from amr.domain.status import JobStatus
+
+#: 库名要拼进 CREATE DATABASE，标识符无法参数化，白名单校验后再拼
+_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _make_job(job_id: str, now: datetime) -> Job:
@@ -48,7 +52,11 @@ def test_settings(settings: Settings) -> Settings:
     config = dict(resolved.mysql_config)
     database = config.pop("database")
 
-    # 建库这一步要连「服务器」而不是「某个库」，所以先摘掉 database 再连
+    # 建库这一步要连「服务器」而不是「某个库」，所以先摘掉 database 再连。
+    # 标识符没法参数化，所以先过白名单再拼——与 tests/contract/conftest.py 同一规矩（spec/000 §7）
+    if not _SAFE_IDENTIFIER.fullmatch(str(database)):
+        raise ValueError(f"测试库名只允许字母、数字与下划线：{database!r}")
+
     conn = mysql.connector.connect(**config)  # type: ignore[arg-type]
     try:
         cursor = conn.cursor()
