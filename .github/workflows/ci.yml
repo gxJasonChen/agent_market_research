@@ -129,7 +129,11 @@ jobs:
             target_ref="development"
           fi
           echo "校验提升边：${source_ref} → ${target_ref}"
-          python3 scripts/check_promotion.py "origin/${source_ref}" "origin/${target_ref}"
+          # --audit：CI 只核对不变量，不声明本次发布的版本号——这里也无从知道它。
+          # 不给这个开关的话，base=main 的 PR 会永远卡在「发布边必须指定 --tag」上，
+          # 那条 check 没有任何办法变绿。版本号是发布执行人在 §2.5 里的事。
+          python3 scripts/check_promotion.py --audit \
+            "origin/${source_ref}" "origin/${target_ref}"
 
   open-pr:
     name: 自动开 PR 到 development（通知 Codex）

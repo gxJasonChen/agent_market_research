@@ -97,7 +97,7 @@ def _release_to_main(repo: Path, tag: str) -> None:
 
 
 def test_integration_edge_passes_when_target_is_ancestor(repo: Path) -> None:
-    """TC-I-015 正常集成：`bugfix` 领先且没有分叉 → 允许提升，并给出该执行的命令。"""
+    """TC-I-015（REQ-015） 正常集成：`bugfix` 领先且没有分叉 → 允许提升，并给出该执行的命令。"""
     _advance_bugfix(repo, "feat: 第一个改动", "feat: 第二个改动")
 
     result = _run(repo, "bugfix", "development")
@@ -108,7 +108,7 @@ def test_integration_edge_passes_when_target_is_ancestor(repo: Path) -> None:
 
 
 def test_diverged_target_is_blocked_and_named(repo: Path) -> None:
-    """TC-I-015 分叉：`development` 上有 `bugfix` 没有的提交 → 拦下并点名。"""
+    """TC-I-015（REQ-015） 分叉：`development` 上有 `bugfix` 没有的提交 → 拦下并点名。"""
     _git(repo, "checkout", "development")
     _commit(repo, "chore: 直接提交到 development")
     _advance_bugfix(repo, "feat: 我的改动")
@@ -120,7 +120,7 @@ def test_diverged_target_is_blocked_and_named(repo: Path) -> None:
 
 
 def test_release_edge_passes_after_a_real_no_ff_release(repo: Path) -> None:
-    """TC-I-016 第二次发布：`main` 上有前一次 `--no-ff` 的合并提交，守卫不能报假警。
+    """TC-I-016（REQ-015） 第二次发布：`main` 上有前一次 `--no-ff` 的合并提交，守卫不能报假警。
 
     这是设计里最容易写错的一条：合并提交只存在于 `main` 上，
     因此「`main` 是 `development` 的祖先」永远不成立（spec/000 §2.3）。
@@ -139,7 +139,7 @@ def test_release_edge_passes_after_a_real_no_ff_release(repo: Path) -> None:
 
 
 def test_release_edge_blocks_private_commit_on_main(repo: Path) -> None:
-    """TC-I-016 不变量 2：`main` 上直接提交的代码必须被拦下（而不是被合并悄悄带过）。"""
+    """TC-I-016（REQ-015） 不变量 2：`main` 上直接提交的代码必须被拦下（而不是被合并悄悄带过）。"""
     _advance_bugfix(repo, "feat: 正常改动")
     _accept_into_development(repo)
     _git(repo, "checkout", "main")
@@ -152,7 +152,7 @@ def test_release_edge_blocks_private_commit_on_main(repo: Path) -> None:
 
 
 def test_merge_that_bypasses_the_release_edge_is_blocked(repo: Path) -> None:
-    """TC-I-018 绕过发布边、把 `bugfix` 直接 `--no-ff` 合进 `main`，必须被拦下。
+    """TC-I-018（REQ-015） 绕过发布边、把 `bugfix` 直接 `--no-ff` 合进 `main`，必须被拦下。
 
     这次合并在 `main` 上留下的提交**全部来自 `bugfix`**，内容早就在 `development`
     上了——于是没有任何非合并提交会落进「目标分支私有提交」这个集合。守卫若用
@@ -175,12 +175,104 @@ def test_merge_that_bypasses_the_release_edge_is_blocked(repo: Path) -> None:
 
     assert result.returncode == 1, result.stdout
     assert "绕过发布边合进 main" in result.stdout
-    # 正当的发布合并提交仍要放行，不能因为这次拦截把 v0.1.0 也算成私货
-    assert "0 个" in result.stdout
+    # 断言确切计数：正当的发布合并提交（v0.1.0）仍要放行，不能因为这次拦截被算成私货。
+    # 原本这里写 `assert "0 个" in stdout`，匹配到的其实是「待提升提交」那一行——
+    # 本场景里它恰好也是 0，所以断言恒真、测不到注释声称的东西。
+    assert "目标分支私有提交：1 个（另有 1 个带 tag 的发布合并提交）" in result.stdout
+
+
+def test_arbitrary_tag_does_not_launder_a_bypass_merge(repo: Path) -> None:
+    """TC-I-018（REQ-015） 绕过发布边之后补一个**任意** tag，不能换来放行。
+
+    判别发布合并提交的条件里，「带 tag」必须是「带 **SemVer 版本** tag」。只要
+    「挂了 tag」就算数，补一句 `git tag wip` 就能让守卫主动背书那次绕过——它会渲染进
+    「放行的发布合并提交」并打印「按 §2.2 放行」。白名单的判据必须与不变量 3 的
+    管辖范围一致，否则 H1 堵掉的假阴性只差一条 `git tag`。
+    """
+    _advance_bugfix(repo, "feat: 第一批")
+    _accept_into_development(repo)
+    _release_to_main(repo, "v0.1.0")
+    _advance_bugfix(repo, "feat: 第二批")
+    _accept_into_development(repo)
+
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--no-ff", "bugfix", "-m", "chore: 绕过发布边")
+    _git(repo, "tag", "wip")
+
+    result = _run(repo, "development", "main", "--tag", "v0.2.0")
+
+    assert result.returncode == 1, result.stdout
+    assert "绕过发布边" in result.stdout
+
+
+def test_tag_pointing_at_a_tree_does_not_break_the_guard(repo: Path) -> None:
+    """TC-I-018（REQ-015） tag 可以合法地指向 tree/blob，那时守卫不能整个崩掉。
+
+    `git tag v9.9.9 <tree-sha>` 是合法的。这种 tag 送到 `merge-base --is-ancestor`
+    会以 128 报错（「is a tree, not a commit」）而不是回 1，于是 `_is_ancestor` 抛异常，
+    守卫**对所有边**一起失效——连与 tag 毫无关系的集成边自检都跑不了，报文还指不到成因。
+    """
+    _advance_bugfix(repo, "feat: 待提升")
+    _git(repo, "tag", "v9.9.9", _git(repo, "rev-parse", "HEAD^{tree}"))
+
+    result = _run(repo, "bugfix", "development")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "无法采集事实" not in result.stdout + result.stderr
+
+
+def test_missing_target_branch_is_a_no_op(repo: Path) -> None:
+    """TC-I-015（REQ-015） 目标分支还不存在时退 0，不当成错误——那是 bootstrap 的正常状态。
+
+    新仓库第一次 push 到 `bugfix` 时 `development` 还不存在，而 ci.yml 里专门有一步
+    负责创建它。这里退 1 会让依赖 `branch-guard` 的 `open-pr` 被连带 skip，
+    那一步永远到不了，交棒彻底停摆。
+    """
+    _git(repo, "branch", "-D", "development")
+    _advance_bugfix(repo, "feat: 第一次推送")
+
+    result = _run(repo, "bugfix", "development")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "还不存在" in result.stdout + result.stderr
+
+
+def test_tag_on_origin_main_is_not_misplaced_when_local_main_is_stale(repo: Path) -> None:
+    """TC-I-018（REQ-015） 本地 `main` 陈旧时，不能把落在 `origin/main` 上的版本 tag 报成错位。
+
+    多机协作里很常见：别人发完版，这台机器只 `git fetch --tags`，本地 `main` 没动。
+    判据是全局不变量，就不该让一个可能过时的引用压过权威引用，更不该在两者不一致时
+    静默取本地。
+    """
+    _advance_bugfix(repo, "feat: 批次一")
+    _accept_into_development(repo)
+    head = _git(repo, "rev-parse", "development")
+    _git(repo, "update-ref", "refs/remotes/origin/main", head)
+    _git(repo, "tag", "-a", "v1.0.0", "-m", "v1.0.0", head)
+
+    result = _run(repo, "bugfix", "development")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "不在 main 上" not in result.stdout
+
+
+def test_missing_main_is_fail_closed(repo: Path) -> None:
+    """TC-I-018（REQ-015） 定位不到 `main` 时，不变量 3 必须显式报「未校验」而不是静默放过。
+
+    静默返回空等于「不变量 3 不检查」，而这次改动刚把「缺东西就降级成不检查」
+    定性为比直接报错危险——同一份实现不该给自己留一个这样的分支。
+    """
+    _advance_bugfix(repo, "feat: 待发布")
+    _git(repo, "branch", "-m", "main", "trunk")  # 让 main 从此不存在
+
+    result = _run(repo, "bugfix", "development")
+
+    assert result.returncode == 1, result.stdout
+    assert "定位不到 main" in result.stdout
 
 
 def test_version_tag_outside_main_is_blocked(repo: Path) -> None:
-    """TC-I-018 不变量 3：版本 tag 打在非 `main` 分支上要被拦下。
+    """TC-I-018（REQ-015） 不变量 3：版本 tag 打在非 `main` 分支上要被拦下。
 
     原本 tag 在实现里只以名字出现，只查格式与重名，从不看它指向哪个提交，
     所以「tag 只打在 main 上」这一句是零覆盖的。
@@ -192,11 +284,11 @@ def test_version_tag_outside_main_is_blocked(repo: Path) -> None:
 
     assert result.returncode == 1
     assert "v0.9.9" in result.stdout
-    assert "没打在 main 上" in result.stdout
+    assert "不在 main 上" in result.stdout
 
 
 def test_wrong_direction_is_rejected(repo: Path) -> None:
-    """TC-I-015 方向白名单：反向提升连评估都不做（spec/000 §2.2）。"""
+    """TC-I-015（REQ-015） 方向白名单：反向提升连评估都不做（spec/000 §2.2）。"""
     result = _run(repo, "development", "bugfix")
 
     assert result.returncode == 1
@@ -204,7 +296,7 @@ def test_wrong_direction_is_rejected(repo: Path) -> None:
 
 
 def test_unknown_branch_is_named_as_unknown(repo: Path) -> None:
-    """TC-I-015 分支名打错时说「不存在」，不要说「方向不允许」。
+    """TC-I-015（REQ-015） 分支名打错时说「不存在」，不要说「方向不允许」。
 
     后者会把人引去读 §2.2 的方向白名单，而真正的问题只是一个拼写错误。
     """
@@ -216,7 +308,7 @@ def test_unknown_branch_is_named_as_unknown(repo: Path) -> None:
 
 
 def test_guard_is_read_only(repo: Path) -> None:
-    """TC-I-017 守卫只诊断不动手：跑完之后 ref 与工作区必须原样。
+    """TC-I-017（REQ-015） 守卫只诊断不动手：跑完之后 ref 与工作区必须原样。
 
     合并权在 spec/000 §2.2 里是分角色的（A 边属 QA、B 边属人），
     工具一旦顺手把合并做了，这个分工就失效了。

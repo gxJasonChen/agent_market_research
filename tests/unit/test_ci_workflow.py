@@ -41,14 +41,14 @@ def triggers(workflow: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_gate_and_guard_cover_every_push_to_bugfix(triggers: dict[str, Any]) -> None:
-    """TC-U-033 push 到 `bugfix` 是主触发点：开发 Agent 的每一次推送都要过门禁。"""
+    """TC-U-033（REQ-015） push 到 `bugfix` 是主触发点：开发 Agent 的每一次推送都要过门禁。"""
     assert triggers["push"]["branches"] == ["bugfix"]
 
 
 def test_branch_guard_runs_on_push_not_only_on_pull_request(
     workflow: dict[str, Any], triggers: dict[str, Any]
 ) -> None:
-    """TC-U-033 `branch-guard` 必须挂在 push 到 `bugfix` 上（spec/000 §2.7）。
+    """TC-U-033（REQ-015） `branch-guard` 必须挂在 push 到 `bugfix` 上（spec/000 §2.7）。
 
     只挂 `pull_request` 是不够的：bot 开出来的 PR 其运行会被扣在 `action_required`，
     这道校验于是在自动流程里从不执行。断言的写法要挡住「有人把 push 那一半删掉」，
@@ -60,10 +60,16 @@ def test_branch_guard_runs_on_push_not_only_on_pull_request(
     assert "pull_request" in condition
     assert "push" in condition
     assert "${{" not in condition, "`if` 里不该再有未展开的 ${{ }}"
+    # 这一条是为 `needs` 的语义守的：上游被跳过，下游一起被跳过——不报错，只是静默停摆。
+    # 谁要是把 branch-guard 的 push 触发面收窄，`open-pr` 就永远开不出 PR，
+    # 而门禁仍然全绿。所以这里钉死它的触发面必须覆盖 open-pr 的那一段。
+    assert "refs/heads/bugfix" in condition, (
+        "branch-guard 的 push 触发面被收窄：open-pr 依赖它，会被连带 skip 而静默停摆"
+    )
 
 
 def test_open_pr_waits_for_the_branch_guard(workflow: dict[str, Any]) -> None:
-    """TC-U-033 不变量红了就不该自动开 PR 去请求 review（spec/000 §2.7）。
+    """TC-U-033（REQ-015） 不变量红了就不该自动开 PR 去请求 review（spec/000 §2.7）。
 
     少了这条依赖，「检查会失败」与「失败了会阻断」就是两回事：分叉照样开 PR 并 @Codex，
     机械校验沦为装饰。
@@ -78,5 +84,5 @@ def test_open_pr_waits_for_the_branch_guard(workflow: dict[str, Any]) -> None:
 def test_pull_request_trigger_covers_both_promotion_targets(
     triggers: dict[str, Any],
 ) -> None:
-    """TC-U-033 PR 侧要覆盖两条提升边的目标分支（§2.2 只允许 `development` 与 `main`）。"""
+    """TC-U-033（REQ-015） PR 侧要覆盖两条提升边的目标分支（§2.2 只允许 `development` 与 `main`）。"""
     assert set(triggers["pull_request"]["branches"]) == {"development", "main"}

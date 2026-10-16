@@ -10,6 +10,11 @@
 它**只读**：不合并、不推送、不改任何 ref，只给出结论、阻断点与「接下来该执行的命令」。
 工具一旦顺手把合并做掉，spec/000 §2.2 的角色分工（集成边属 QA、发布边属人）就失效了。
 
+已知边界（写在这里而不是藏起来）：`--tag` 的「版本没发过」只比对**本地** tag
+（`git tag --list`）。别人在远端建的 tag、本地又没 `git fetch --tags` 时看不出来，
+要等 `git push --tags` 才炸。守卫不联网是有意的——一个只读的本地工具不该为了这条
+边角检查去访问远端；发布前先 `git fetch --prune --tags origin` 即可。
+
 判定逻辑（`evaluate`）是纯函数，由 `tests/unit/test_promotion_guard.py` 覆盖；
 git 采集（`collect_facts`）由 `tests/integration/test_promotion_guard.py` 在真实仓库上覆盖。
 """
@@ -120,8 +125,14 @@ def evaluate(
     *,
     tag: str | None = None,
     existing_tags: tuple[str, ...] = (),
+    audit: bool = False,
 ) -> Verdict:
-    """决定「这次提升能不能做」。纯函数：同样的输入永远给同样的结论。"""
+    """决定「这次提升能不能做」。纯函数：同样的输入永远给同样的结论。
+
+    `audit=True` 是「只核对不变量，不声明本次发布的版本」：跳过版本号相关的门禁。
+    把「审计不变量」与「宣布发哪个版本」压成同一个入口，会让前者被后者连带否决——
+    CI 上 `development → main` 的 PR 无从知道下一个版本号，那条 check 就永远是红的。
+    """
     blockers: list[str] = []
     notes: list[str] = []
 
@@ -163,13 +174,13 @@ def evaluate(
             f"--tag 只对发布边有意义：{edge.direction} 是 --ff-only，不接受版本号"
         )
 
-    if edge.strategy == "no-ff":
+    if edge.strategy == "no-ff" and not audit:
         if tag is None:
             # 不能降级成提示：缺了 --tag，「版本号合法」与「版本没发过」两道门禁（§2.5）
             # 会静默变成不检查，而调用方（尤其是 CI）无从察觉。
             blockers.append(
                 "发布边必须指定 --tag（spec/000 §2.5：版本号 SemVer，且该 tag 尚不存在）；"
-                "缺了它，版本号相关的门禁会变成不检查"
+                "缺了它，版本号相关的门禁会变成不检查。只想核对不变量而不发版，用 --audit"
             )
         elif not SEMVER.match(tag):
             blockers.append(f"版本号 {tag!r} 不符合 SemVer（形如 v0.1.0）")
@@ -177,12 +188,10 @@ def evaluate(
             blockers.append(f"tag {tag} 已存在，换一个版本号（不变量 3：一个版本只发一次）")
 
     # 不变量 3 的后半句「tag 只打在 main 上」是全局的，与本次走哪条边无关。
+    # 条目既可能是错位的 tag，也可能是「定位不到 main」这条 fail-closed 说明。
     if facts.misplaced_tags:
         listed = "\n".join(f"      {item}" for item in facts.misplaced_tags)
-        blockers.append(
-            f"有 {len(facts.misplaced_tags)} 个版本 tag 没打在 main 上"
-            f"（不变量 3：tag 只打在 main 上）：\n{listed}"
-        )
+        blockers.append(f"不变量 3（版本 tag 只打在 main 上）未通过：\n{listed}")
 
     if facts.release_merges:
         notes.append(
@@ -225,41 +234,44 @@ def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
 
 
 def _tagged_commits(repo: Path) -> tuple[tuple[str, str], ...]:
-    """(tag 名, 它指向的提交)。附注 tag 要剥一层，否则拿到的是 tag 对象而不是提交。"""
-    rows = _lines(
-        _git(
-            repo,
-            "for-each-ref",
-            "--format=%(refname:short) %(*objectname) %(objectname)",
-            "refs/tags",
-        )
-    )
-    out: list[tuple[str, str]] = []
-    for row in rows:
-        fields = row.split()
-        if len(fields) == 3:  # 附注 tag：%(objectname) 是 tag 对象，%(*objectname) 才是提交
-            out.append((fields[0], fields[1]))
-        elif len(fields) == 2:  # 轻量 tag：%(objectname) 本身就是提交
-            out.append((fields[0], fields[1]))
-    return tuple(out)
+    """(tag 名, 它指向的提交)。**只收能解成 commit 的 tag。**
 
-
-def _release_branch(repo: Path) -> str | None:
-    """不变量 3 里说的 `main`。
-
-    CI 只 fetch 了远程跟踪引用，本地不一定有 `main` 分支，所以两个名字都试。
+    两条理由，都不是假想：
+    - tag 可以合法地指向 tree/blob（`git tag v9 <tree-sha>`）。那种 tag 送到
+      `merge-base --is-ancestor` 会以 128 报错而不是回 1，`_is_ancestor` 于是抛
+      `GitError`，守卫**对所有边**一起失效——连与 tag 毫无关系的集成边自检都跑不了，
+      报文还完全指不到成因。
+    - 用 `^{commit}` 解引用而不是自己剥 `%(objectname)`：附注 tag 指向另一个 tag 时
+      要递归剥，分隔符解析也就不用操心 tag 名里有没有空格（`git check-ref-format`
+      不允许 refname 含空格，但没必要把自己的健壮性押在这条上）。
     """
-    for candidate in ("main", "origin/main"):
+    out: list[tuple[str, str]] = []
+    for name in _lines(_git(repo, "tag", "--list")):
         result = subprocess.run(
-            ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{name}^{{commit}}"],
             cwd=repo,
             capture_output=True,
             text=True,
             check=False,
         )
-        if result.returncode == 0:
-            return candidate
-    return None
+        if result.returncode == 0 and result.stdout.strip():
+            out.append((name, result.stdout.strip()))
+    return tuple(out)
+
+
+def _release_refs(repo: Path) -> tuple[str, ...]:
+    """不变量 3 里说的 `main`——**所有**能定位到的候选。
+
+    取多个而不是「先命中谁算谁」：本地 `main` 完全可能陈旧（别人在远端发完版、
+    这台机器只 `git fetch --tags`），拿陈旧的本地 `main` 当唯一判据会把一个正当的
+    版本 tag 报成「没打在 main 上」。判据是全局不变量，就不该让一个可能过时的引用
+    压过权威引用，也不该在两者不一致时静默取本地。
+    """
+    out: list[str] = []
+    for candidate in ("origin/main", "main"):
+        if _ref_exists(repo, candidate):
+            out.append(candidate)
+    return tuple(out)
 
 
 def _classify_foreign(
@@ -271,7 +283,14 @@ def _classify_foreign(
     `bugfix` 直接 `--no-ff` 合进 `main`——会彻底隐形：它带进来的内容都在 `development`
     上，于是没有任何非合并提交会落进这个集合，守卫对着分叉报「允许提升」。
 
-    区分二者的依据只有 tag：正经发布按 §2.2 一定在合并提交上打了版本号，绕过的那次没有。
+    判别依据是「合并提交 + **SemVer 版本 tag** + 第二父在源分支上」，三条缺一不可：
+
+    - 少了「合并提交」，正经发布会被当成私货，每次发完版守卫永久报假警；
+    - 少了第二父那一条，把任意一条旁支 `--no-ff` 合进 `main` 也算发布；
+    - 少了 **SemVer** 那一条（只要求「挂了 tag」），绕过发布边之后再补一句
+      `git tag wip` 就能让守卫**主动背书**那次合并——它会把该合并渲染进
+      「放行的发布合并提交」并打印「按 §2.2 放行」。这正是 §2.3 写「带**版本** tag」
+      而不是「带 tag」的原因，白名单的判据必须与不变量 3 的管辖范围一致。
     """
     rows = _lines(_git(repo, "log", "--format=%H%x09%P%x09%s", target, "--not", source))
     private: list[str] = []
@@ -283,8 +302,10 @@ def _classify_foreign(
         sha, parents_raw, subject = fields
         parents = parents_raw.split()
         names = tagged.get(sha, ())
-        # 合并提交 + 带 tag + 第二父在源分支上 = 沿发布边留下的合并提交。
-        is_release = len(parents) >= 2 and bool(names) and _is_ancestor(repo, parents[1], source)
+        versions = tuple(name for name in names if SEMVER.match(name))
+        is_release = (
+            len(parents) >= 2 and bool(versions) and _is_ancestor(repo, parents[1], source)
+        )
         label = f"{sha[:12]} {subject}"
         if names:
             label += f"（tag: {', '.join(names)}）"
@@ -292,18 +313,25 @@ def _classify_foreign(
     return tuple(private), tuple(releases)
 
 
-def _misplaced_tags(repo: Path, tagged: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
+def _misplaced_tags(
+    repo: Path, tagged: tuple[tuple[str, str], ...], release_refs: tuple[str, ...]
+) -> tuple[str, ...]:
     """不变量 3 的后半句：版本 tag 只打在 `main` 上。
 
     只查 SemVer 形态的 tag——别的名字（工具打的、临时的）不在规格管辖范围内。
+    只要 tag 落在**任一**候选 `main` 上就算合规（见 `_release_refs`）。
     """
-    release = _release_branch(repo)
-    if release is None:
-        return ()
+    if not release_refs:
+        # fail-closed：定位不到 `main` 就说出来。静默返回空等于「不变量 3 不检查」，
+        # 而这次改动刚刚把「缺东西就降级成不检查」定性为比直接报错危险得多——
+        # 同一份实现里不能既这么要求别人、又给自己留一个静默分支。
+        return ("定位不到 main（本地与 origin/main 都没有），不变量 3 本次未校验；先取到 main 再跑",)
     out: list[str] = []
     for name, sha in tagged:
-        if SEMVER.match(name) and not _is_ancestor(repo, sha, release):
-            out.append(f"{name} → {sha[:12]}（不在 {release} 上）")
+        if not SEMVER.match(name):
+            continue
+        if not any(_is_ancestor(repo, sha, ref) for ref in release_refs):
+            out.append(f"{name} → {sha[:12]}（不在 {'/'.join(release_refs)} 上）")
     return tuple(out)
 
 
@@ -330,7 +358,7 @@ def collect_facts(
         dirty_paths=_lines(_git(repo, "status", "--porcelain")),
         target_private_commits=private,
         release_merges=releases,
-        misplaced_tags=_misplaced_tags(repo, tagged_rows),
+        misplaced_tags=_misplaced_tags(repo, tagged_rows, _release_refs(repo)),
         target_is_ancestor_of_source=_is_ancestor(repo, target, source),
         pending_commits=pending,
     )
@@ -462,7 +490,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--with-system", action="store_true", help="连同 make test-system 一起跑（需真实中间件）"
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="只核对不变量，不声明本次发布的版本（跳过 --tag 相关门禁；与 --tag 互斥）",
+    )
+    args = parser.parse_args(argv)
+    if args.audit and args.tag is not None:
+        parser.error("--audit 与 --tag 互斥：审计不声明版本，发版必须给版本号")
+    return args
 
 
 def _ref_exists(repo: Path, ref: str) -> bool:
@@ -500,6 +536,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return 1
 
+    # 目标分支还不存在不是「违规」，是「还没有东西可校验」——新仓库第一次 push 到
+    # `bugfix` 就是这状态，而 ci.yml 里专门有一步负责创建 `development`。
+    # 这里若退 1，依赖它的 `open-pr` 会被连带 skip，那一步永远到不了，bootstrap 死锁。
+    if not _ref_exists(args.repo, args.target):
+        print(
+            f"目标分支 {args.target} 还不存在，没有可校验的提升（首次推送的正常状态）",
+            file=sys.stderr,
+        )
+        return 0
+
     try:
         facts = collect_facts(
             args.repo, edge, source_ref=args.source, target_ref=args.target
@@ -509,7 +555,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"无法采集事实：{exc}", file=sys.stderr)
         return 1
 
-    verdict = evaluate(edge, facts, tag=args.tag, existing_tags=existing_tags)
+    verdict = evaluate(
+        edge, facts, tag=args.tag, existing_tags=existing_tags, audit=args.audit
+    )
 
     gate_results: tuple[tuple[str, bool], ...] = ()
     if args.run_gates and verdict.ok:
