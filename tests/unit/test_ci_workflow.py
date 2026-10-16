@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +164,37 @@ def test_codex_review_cannot_write_contents(codex_review: dict[str, Any]) -> Non
 
     assert permissions.get("contents") == "read"
     assert permissions.get("pull-requests") == "write"
+
+
+def test_no_workflow_uses_expression_syntax_as_a_literal() -> None:
+    """TC-U-034（REQ-015） 任何 workflow 都不许在 `run` 块里出现表达式语法的字面量。
+
+    `run:` 的脚本内容会被 GitHub 扫描 `${{ … }}` 表达式，而**空表达式直接让整个
+    workflow 校验失败**：运行零 job、只提示 "This run likely failed because of a
+    workflow file issue"，**而文件本身 YAML 解析完全正常**——逐键核对过，本地门禁
+    （lint / type / test）也全绿。这个坑真踩过：`ci.yml` 因此红了一次，把门禁本身
+    挡在门外；`codex-qa.yml` 那次失败是它与「`workflow_run` 要求默认分支」两个问题
+    叠加，探针只证明了后者。
+
+    典型诱因是在注释里举例说明「别用表达式语法」——**举例本身就成了非法表达式**。
+    这类失效本地一条都测不出来，只有推上去才会以「零 job 的失败运行」出现。
+    """
+    contexts = r"\s*(github|secrets|vars|env|needs|steps|runner|inputs|matrix|job|jobs)\b"
+    offenders: list[str] = []
+
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        document = _load(path)
+        for job_id, job in (document.get("jobs") or {}).items():
+            for index, step in enumerate(job.get("steps") or []):
+                for expression in re.findall(r"\$\{\{(.*?)\}\}", str(step.get("run", "")), re.S):
+                    if not expression.strip():
+                        offenders.append(f"{path.name} {job_id}.steps[{index}]：空表达式")
+                    elif not re.match(contexts, expression):
+                        offenders.append(
+                            f"{path.name} {job_id}.steps[{index}]：可疑表达式 {expression.strip()!r}"
+                        )
+
+    assert offenders == [], f"run 块里有非法的表达式字面量：{offenders}"
 
 
 def test_codex_review_runs_read_only_with_a_timeout(codex_review: dict[str, Any]) -> None:
