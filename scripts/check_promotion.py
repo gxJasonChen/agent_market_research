@@ -38,6 +38,12 @@ SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
 #: 证据块里每条清单最多列几条，避免长批次把结论冲掉
 PREVIEW_LIMIT = 5
 
+#: 「本轮没有东西可校验」的专用退出码，与 0（校验通过）分开。
+#: 目标分支还不存在是 bootstrap 的正常状态，但它必须与「通过」可区分：调用方
+#: ——发布清单、CI——看的是退出码，用 0 表示跳过，等于让一个取不到目标分支的环境
+#: 把门禁静默变成绿灯，而那正是守卫最不该有的失效方式。
+NOTHING_TO_CHECK = 2
+
 
 class GitError(RuntimeError):
     """git 命令失败。把 stderr 带出来，避免「静默失败」被当成通过。"""
@@ -501,6 +507,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return args
 
 
+def _resolve_ref(repo: Path, ref: str) -> str | None:
+    """把裸分支名解析成实际存在的引用；都找不到返回 None。
+
+    先试字面名，再退到 `origin/<名>`。这一步是必需的，不是顺手加的：规格与手册给的
+    调用形式**全是裸分支名**（`check_promotion.py development main --tag vX`），而它们
+    出现的场合——CI 的 checkout、`git clone -b <分支>`、worktree——本地往往只有源分支。
+    不退回的话，目标分支会被判成「不存在」，而接下来的处置（跳过）会让发布清单上的
+    「守卫放行」读到一个**假的通过**：`RUNBOOK` §7.3 教的顺序恰恰是先跑守卫、
+    再 `git checkout main`，那时本地根本没有 `main`。
+    """
+    if _ref_exists(repo, ref):
+        return ref
+    if not ref.startswith("origin/") and _ref_exists(repo, f"origin/{ref}"):
+        return f"origin/{ref}"
+    return None
+
+
 def _ref_exists(repo: Path, ref: str) -> bool:
     result = subprocess.run(
         ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
@@ -524,7 +547,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if edge is None:
         # 先把「分支名不认识」和「方向不允许」分开：否则打错一个字母得到的是
         # 「不允许的提升方向」，把人引去读 §2.2，而真正的问题只是拼写。
-        unknown = [ref for ref in (args.source, args.target) if not _ref_exists(args.repo, ref)]
+        unknown = [
+            ref for ref in (args.source, args.target) if _resolve_ref(args.repo, ref) is None
+        ]
         if unknown:
             print(f"分支不存在：{'、'.join(unknown)}", file=sys.stderr)
         else:
@@ -536,20 +561,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return 1
 
-    # 目标分支还不存在不是「违规」，是「还没有东西可校验」——新仓库第一次 push 到
-    # `bugfix` 就是这状态，而 ci.yml 里专门有一步负责创建 `development`。
-    # 这里若退 1，依赖它的 `open-pr` 会被连带 skip，那一步永远到不了，bootstrap 死锁。
-    if not _ref_exists(args.repo, args.target):
+    source_ref = _resolve_ref(args.repo, args.source)
+    if source_ref is None:
+        print(f"源分支 {args.source} 不存在（本地与 origin 都没有）", file=sys.stderr)
+        return 1
+
+    # 目标分支还不存在是 bootstrap 的正常状态（新仓库第一次 push 到 `bugfix`，
+    # ci.yml 里专门有一步负责创建 `development`），所以要放过而不是退 1——否则
+    # 依赖 `branch-guard` 的 `open-pr` 会被连带 skip，那一步永远到不了，死锁。
+    # 但放过**不等于通过**：退 0 会让取不到目标分支的环境把门禁静默变成绿灯。
+    target_ref = _resolve_ref(args.repo, args.target)
+    if target_ref is None:
         print(
-            f"目标分支 {args.target} 还不存在，没有可校验的提升（首次推送的正常状态）",
+            f"目标分支 {args.target} 还不存在（本地与 origin/{args.target} 都没有），"
+            f"本轮没有可校验的提升；退出码 {NOTHING_TO_CHECK} 表示「跳过」而非「通过」",
             file=sys.stderr,
         )
-        return 0
+        return NOTHING_TO_CHECK
 
     try:
-        facts = collect_facts(
-            args.repo, edge, source_ref=args.source, target_ref=args.target
-        )
+        facts = collect_facts(args.repo, edge, source_ref=source_ref, target_ref=target_ref)
         existing_tags = _lines(_git(args.repo, "tag", "--list"))
     except GitError as exc:
         print(f"无法采集事实：{exc}", file=sys.stderr)
