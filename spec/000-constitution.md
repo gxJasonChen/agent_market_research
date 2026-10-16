@@ -47,17 +47,27 @@
 | **B 发布** | `development` → `main` | `--no-ff` | 人（人工合并） | §2.5 |
 
 - **A 用 `--ff-only`**：`bugfix` 是唯一的开发干线，能快进是可预期的结果，`development` 因此恒等于「最后一次被接受的 `bugfix` 头」。**快进失败必须停下来查因**，不许改用普通合并把它盖过去——那说明已经分叉了。
-- **B 用 `--no-ff`**：发布边界要留痕，也需要一个能整体回滚的单位（`git revert -m 1 <merge>`）。合并后在 `main` 的合并提交上打 tag。
+- **B 用 `--no-ff`**：发布边界要留痕，也需要一个能整体回滚的单位。合并后在 `main` 的合并提交上打 tag。
+- **回滚不要在 `main` 上直接 `git revert -m 1 <merge>`。** 那会产生一个 `bugfix` 上没有的提交，
+  不变量 2 当场为红，而且**没有合法办法消除它**——要消除就得把该提交弄回 `development`，
+  正是上面刚禁止的反向流动（cherry-pick 会换 sha，救不了）。正确做法是在 `bugfix` 上
+  revert 出问题的提交，再走 A→B 两次提升。回滚因此也要过一遍 QA 门禁，这是有意的。
 
 ### 2.3 不变量
 
 1. **不反向流动**：`development` 上不存在 `bugfix` 没有的提交。
-2. **`main` 不带私货**：`main` 上只允许出现两类提交——历史发布留下的合并提交，以及 `bugfix` 上已有的提交。
+2. **`main` 不带私货**：`main` 上只允许出现两类提交——**带版本 tag 的发布合并提交**，以及 `bugfix` 上已有的提交。
 3. **tag 只打在 `main` 上**，版本号 SemVer，从 `v0.1.0` 起。
 
 > 不变量 2 的措辞是刻意的：发布边用 `--no-ff`，`main` 的合并提交**不在** `development` 上，
 > 所以「`main` 是 `development` 的祖先（`main ⊆ development`）」是**错的**说法；
-> 能机械校验的形式是「`main` 上没有 `bugfix` 之外的提交」，见 §2.7。
+> 能机械校验的形式是「`main` 上没有 `bugfix` 之外的提交，发布合并提交除外」，见 §2.7。
+>
+> **「带版本 tag」这个限定词不能省。** 判别发布合并提交时必须同时满足「是合并提交」与
+> 「带 tag」两条：只看「是合并提交」的话，一次绕过发布边的合并——把已经验收过的 `bugfix`
+> 直接 `--no-ff` 合进 `main`——会和正经发布长得一模一样（它带进来的内容都在 `development`
+> 上，没有任何非合并提交露得出破绽），于是不被拦下。同理，**不能用 `--no-merges` 一刀切**：
+> 那正是上面这个漏洞的成因，见 §2.7 的守卫实现注释。
 
 ### 2.4 集成边 A（`bugfix` → `development`）门禁
 
@@ -114,7 +124,7 @@ git push origin main --tags
 
 | 位置 | 检查 |
 |---|---|
-| 本地/手工 | `python scripts/check_promotion.py <源分支> <目标分支> [--tag vX.Y.Z] [--run-gates]` |
+| 本地/手工 | `python scripts/check_promotion.py <源分支> <目标分支> [--tag vX.Y.Z] [--run-gates]`（发布边**必须**给 `--tag`，否则版本号相关的门禁不成立） |
 | CI（push 到 `bugfix`） | `.github/workflows/ci.yml` 的 `branch-guard` job：校验 `development` 上没有 `bugfix` 之外的提交 |
 | CI（PR） | 同一个 job：校验 base 上没有 head 之外的提交 |
 

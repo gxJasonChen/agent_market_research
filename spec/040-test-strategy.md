@@ -60,6 +60,9 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | TC-U-028 | 配置真的生效 | REQ-009/013 | `AMR_LOG_LEVEL` 落到 logger；Traces 开关导出到进程环境；Redis 口令特殊字符编码；DB 连接有超时 |
 | TC-U-029 | 队列异常翻译 | REQ-011 | 任务未注册 / broker 异常 → `QueueUnavailableError`，且异常与日志都不带连接串 |
 | TC-U-030 | 占用语义与收尾重试 | REQ-002/004 | `RUNNING` 中重复投递**不再重跑 Flow**；收尾写库的暂时性故障被重试吸收，耗尽后抛出 |
+| TC-U-031 | 提升守卫的方向白名单与规则判定 | REQ-015 | 只放行 §2.2 的两条边；三条不变量逐条拦下并点名——含「不带 tag 的合并提交算私货」（`--no-merges` 一刀切会放过绕过发布边的合并）、「tag 没打在 `main` 上」；该放的也放行 |
+| TC-U-032 | 提升守卫自身不恒真/恒假 + 开关语义 | REQ-015 | 只改一处违规结论必须真的翻转；`--with-system` 隐含 `--run-gates`（原本单独给会静默什么都不跑） |
+| TC-U-033 | CI 工作流的触发点与依赖 | REQ-015 | `branch-guard` 必须同时挂 push 到 `bugfix` 与 PR、`open-pr` 依赖它——bot 开的 PR 其运行被扣在 `action_required`，「只挂 PR」等于永不执行 |
 
 ### 2.2 契约层
 
@@ -91,6 +94,10 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | TC-I-012 | 错误体不泄露内部信息 | REQ-011 | 触发 500 的响应体不含 `Traceback`/`mysql`/密码字样 |
 | TC-I-013 | Worker eager 模式跑通任务体 | REQ-002 | Celery `task_always_eager` 下 `kickoff_flow` 正确推进状态 |
 | TC-I-014 | 生产装配路径 | REQ-009/011/014 | `create_app()` **无参**调用（uvicorn 真实入口）装配出 MySQL/Celery 实现且不需要外部系统；`/healthz` 在中间件全不可达时仍 200；存储不可用 → 503 |
+| TC-I-015 | 提升守卫的方向与分叉判定（真实 git） | REQ-015 | 集成边通过 / 目标分叉被点名 / 反向被拒 / 分支名打错时报「不存在」而非「方向不允许」 |
+| TC-I-016 | 发布边在真实 `--no-ff` 发布之后仍通过 | REQ-015 | 第二次发布不报假警（发布合并提交只存在于 `main` 上）；`main` 上的直接提交被拦 |
+| TC-I-017 | 提升守卫只读 | REQ-015 | 跑完 ref 与工作区原样——合并权是分角色的，工具不许顺手把它做掉 |
+| TC-I-018 | 绕过发布边的合并与错位 tag 被拦下 | REQ-015 | 把 `bugfix` 直接 `--no-ff` 合进 `main` 报红并点名；版本 tag 打在非 `main` 上被点名 |
 
 ### 2.4 系统层
 
@@ -122,6 +129,7 @@ make test-system →  系统测试（需 docker/本机中间件；真模型用 @
 | REQ-012 前端控制台 | — | — | — | TC-S-005 + 前端 vitest：`useJobPolling.spec.ts`（轮询间隔与停止规则）、`crew.spec.ts`（CT-001/002/005）、`result.spec.ts`（result 形状容错）、`url.spec.ts`（job_id 回填）、`App.spec.ts`（首屏与徽章） |
 | REQ-013 可观测性 | TC-U-028 | — | TC-I-010 | TC-S-001 |
 | REQ-014 健康检查 | — | — | TC-I-011 | TC-S-003 |
+| REQ-015 交付流程守卫 | TC-U-031, TC-U-032, TC-U-033 | — | TC-I-015 ~ TC-I-018 | — |
 | NFR-001 离线可跑 | 全部（CI 在无密钥环境执行） | | | |
 | NFR-004 分层依赖 | TC-U-022, 023 | | | |
 | NFR-005 提交延迟 | — | — | TC-I-002 | — |

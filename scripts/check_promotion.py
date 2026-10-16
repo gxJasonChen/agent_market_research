@@ -97,7 +97,12 @@ class Facts:
     target_ref: str
     target_sha: str
     dirty_paths: tuple[str, ...]
+    #: 目标分支上「源分支没有」的提交里，**不算发布合并提交**的那些（私货）。
     target_private_commits: tuple[str, ...]
+    #: 同上集合里被认定为合法发布合并提交的那些，只用来在证据块里展示。
+    release_merges: tuple[str, ...]
+    #: SemVer 版本 tag 里指向 `main` 之外的（不变量 3 的后半句）。全局不变量，与边无关。
+    misplaced_tags: tuple[str, ...]
     target_is_ancestor_of_source: bool
     pending_commits: tuple[str, ...]
 
@@ -129,6 +134,12 @@ def evaluate(
     # 不变量 1、2 的共同形式：目标分支上不能有源分支没有的提交。
     # 出现这类提交就说明已经分叉（有人越过提升边直接写目标分支），
     # 此时「合并」不再是沿一条线前进，历史上再也看不出哪一批被验收过。
+    #
+    # 唯一的例外是发布合并提交（`--no-ff` 把 development 合进 main），它是设计要留的痕，
+    # 由 collect_facts 单独识别并放进 release_merges。识别它必须**同时**满足「是合并提交」
+    # 与「带 tag」：少了 tag 这一条，一次绕过发布边的合并（把已经验收过的 bugfix 直接
+    # --no-ff 合进 main）会和正经发布长得一模一样——它带进来的内容都在 development 上，
+    # 没有任何非合并提交会露出破绽。曾经用 `--no-merges` 一刀切，正是栽在这里。
     if facts.target_private_commits:
         listed = "\n".join(f"      {item}" for item in facts.target_private_commits)
         blockers.append(
@@ -146,13 +157,38 @@ def evaluate(
             f"没有待提升的提交（{facts.target_ref} 与 {facts.source_ref} 内容一致），本次不需要合并"
         )
 
+    # 集成边是 --ff-only，没有版本边界可言。静默忽略会让「我传了 --tag」看起来生效了。
+    if edge.strategy != "no-ff" and tag is not None:
+        blockers.append(
+            f"--tag 只对发布边有意义：{edge.direction} 是 --ff-only，不接受版本号"
+        )
+
     if edge.strategy == "no-ff":
         if tag is None:
-            notes.append("未指定 --tag：合并后别忘了在 main 上打 SemVer tag（spec/000 §2.3）")
+            # 不能降级成提示：缺了 --tag，「版本号合法」与「版本没发过」两道门禁（§2.5）
+            # 会静默变成不检查，而调用方（尤其是 CI）无从察觉。
+            blockers.append(
+                "发布边必须指定 --tag（spec/000 §2.5：版本号 SemVer，且该 tag 尚不存在）；"
+                "缺了它，版本号相关的门禁会变成不检查"
+            )
         elif not SEMVER.match(tag):
             blockers.append(f"版本号 {tag!r} 不符合 SemVer（形如 v0.1.0）")
         elif tag in existing_tags:
             blockers.append(f"tag {tag} 已存在，换一个版本号（不变量 3：一个版本只发一次）")
+
+    # 不变量 3 的后半句「tag 只打在 main 上」是全局的，与本次走哪条边无关。
+    if facts.misplaced_tags:
+        listed = "\n".join(f"      {item}" for item in facts.misplaced_tags)
+        blockers.append(
+            f"有 {len(facts.misplaced_tags)} 个版本 tag 没打在 main 上"
+            f"（不变量 3：tag 只打在 main 上）：\n{listed}"
+        )
+
+    if facts.release_merges:
+        notes.append(
+            f"{facts.target_ref} 上有 {len(facts.release_merges)} 个带 tag 的发布合并提交，"
+            f"按 spec/000 §2.2 放行"
+        )
 
     return Verdict(ok=not blockers, blockers=tuple(blockers), notes=tuple(notes))
 
@@ -188,6 +224,89 @@ def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def _tagged_commits(repo: Path) -> tuple[tuple[str, str], ...]:
+    """(tag 名, 它指向的提交)。附注 tag 要剥一层，否则拿到的是 tag 对象而不是提交。"""
+    rows = _lines(
+        _git(
+            repo,
+            "for-each-ref",
+            "--format=%(refname:short) %(*objectname) %(objectname)",
+            "refs/tags",
+        )
+    )
+    out: list[tuple[str, str]] = []
+    for row in rows:
+        fields = row.split()
+        if len(fields) == 3:  # 附注 tag：%(objectname) 是 tag 对象，%(*objectname) 才是提交
+            out.append((fields[0], fields[1]))
+        elif len(fields) == 2:  # 轻量 tag：%(objectname) 本身就是提交
+            out.append((fields[0], fields[1]))
+    return tuple(out)
+
+
+def _release_branch(repo: Path) -> str | None:
+    """不变量 3 里说的 `main`。
+
+    CI 只 fetch 了远程跟踪引用，本地不一定有 `main` 分支，所以两个名字都试。
+    """
+    for candidate in ("main", "origin/main"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
+def _classify_foreign(
+    repo: Path, target: str, source: str, tagged: dict[str, tuple[str, ...]]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """把「目标分支有、源分支没有」的提交分成（私货，发布合并提交）。
+
+    这里**不能**加 `--no-merges`。加了之后，一次绕过发布边的合并——把已经验收过的
+    `bugfix` 直接 `--no-ff` 合进 `main`——会彻底隐形：它带进来的内容都在 `development`
+    上，于是没有任何非合并提交会落进这个集合，守卫对着分叉报「允许提升」。
+
+    区分二者的依据只有 tag：正经发布按 §2.2 一定在合并提交上打了版本号，绕过的那次没有。
+    """
+    rows = _lines(_git(repo, "log", "--format=%H%x09%P%x09%s", target, "--not", source))
+    private: list[str] = []
+    releases: list[str] = []
+    for row in rows:
+        fields = row.split("\t", 2)
+        if len(fields) != 3:
+            continue
+        sha, parents_raw, subject = fields
+        parents = parents_raw.split()
+        names = tagged.get(sha, ())
+        # 合并提交 + 带 tag + 第二父在源分支上 = 沿发布边留下的合并提交。
+        is_release = len(parents) >= 2 and bool(names) and _is_ancestor(repo, parents[1], source)
+        label = f"{sha[:12]} {subject}"
+        if names:
+            label += f"（tag: {', '.join(names)}）"
+        (releases if is_release else private).append(label)
+    return tuple(private), tuple(releases)
+
+
+def _misplaced_tags(repo: Path, tagged: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
+    """不变量 3 的后半句：版本 tag 只打在 `main` 上。
+
+    只查 SemVer 形态的 tag——别的名字（工具打的、临时的）不在规格管辖范围内。
+    """
+    release = _release_branch(repo)
+    if release is None:
+        return ()
+    out: list[str] = []
+    for name, sha in tagged:
+        if SEMVER.match(name) and not _is_ancestor(repo, sha, release):
+            out.append(f"{name} → {sha[:12]}（不在 {release} 上）")
+    return tuple(out)
+
+
 def collect_facts(
     repo: Path, edge: Edge, *, source_ref: str | None = None, target_ref: str | None = None
 ) -> Facts:
@@ -195,19 +314,12 @@ def collect_facts(
     source = source_ref or edge.source
     target = target_ref or edge.target
 
-    # `--no-merges`：发布边的 `--no-ff` 合并提交只存在于 main 上，那是设计要留的痕，
-    # 不是「私货」——把它们算进不变量会让每次发布之后守卫永久报假警。
-    private = _lines(
-        _git(
-            repo,
-            "log",
-            "--no-merges",
-            "--format=%h %s",
-            target,
-            "--not",
-            source,
-        )
-    )
+    tagged_rows = _tagged_commits(repo)
+    tagged: dict[str, tuple[str, ...]] = {}
+    for name, sha in tagged_rows:
+        tagged[sha] = (*tagged.get(sha, ()), name)
+
+    private, releases = _classify_foreign(repo, target, source, tagged)
     pending = _lines(_git(repo, "log", "--format=%h %s", source, "--not", target))
 
     return Facts(
@@ -217,6 +329,8 @@ def collect_facts(
         target_sha=_git(repo, "rev-parse", "--verify", f"{target}^{{commit}}"),
         dirty_paths=_lines(_git(repo, "status", "--porcelain")),
         target_private_commits=private,
+        release_merges=releases,
+        misplaced_tags=_misplaced_tags(repo, tagged_rows),
         target_is_ancestor_of_source=_is_ancestor(repo, target, source),
         pending_commits=pending,
     )
@@ -246,7 +360,8 @@ def render(
         "",
         f"  {facts.source_ref:<12} = {facts.source_sha[:12]}  （{len(facts.pending_commits)} 个待提升提交）",
         f"  {facts.target_ref:<12} = {facts.target_sha[:12]}",
-        f"  目标分支私有提交：{len(facts.target_private_commits)} 个",
+        f"  目标分支私有提交：{len(facts.target_private_commits)} 个"
+        f"（另有 {len(facts.release_merges)} 个带 tag 的发布合并提交）",
         f"  可快进：{'是' if facts.target_is_ancestor_of_source else '否'}",
         "",
     ]
@@ -278,8 +393,14 @@ def render(
         out.append(f"接下来（执行人：{edge.executor}）：")
         out.extend(f"  {command}" for command in _promotion_commands(edge, tag))
 
+    if facts.release_merges:
+        out.append("")
+        out.append("放行的发布合并提交：")
+        out.extend(f"  {item}" for item in _preview(facts.release_merges))
+
     out.append("")
-    out.append(f"复现：git rev-list --no-merges {edge.target} --not {edge.source}")
+    # 不带 `--no-merges`：这正是判定用的那条命令，照着它核对才不会漏掉合并提交。
+    out.append(f"复现：git log --format='%h %p %s' {edge.target} --not {edge.source}")
     return "\n".join(out)
 
 
@@ -344,17 +465,39 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _ref_exists(repo: Path, ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
+    # `--with-system` 隐含 `--run-gates`。单独给时原本会静默地什么都不跑，
+    # 而「系统测试通过」在 §2.5 里是硬门禁——写了这个开关的人会以为它跑过了。
+    if args.with_system:
+        args.run_gates = True
+
     edge = find_edge(branch_name(args.source), branch_name(args.target))
     if edge is None:
-        allowed = "、".join(item.direction for item in EDGES.values())
-        print(
-            f"不允许的提升方向：{args.source} → {args.target}"
-            f"（spec/000 §2.2 只允许 {allowed}）",
-            file=sys.stderr,
-        )
+        # 先把「分支名不认识」和「方向不允许」分开：否则打错一个字母得到的是
+        # 「不允许的提升方向」，把人引去读 §2.2，而真正的问题只是拼写。
+        unknown = [ref for ref in (args.source, args.target) if not _ref_exists(args.repo, ref)]
+        if unknown:
+            print(f"分支不存在：{'、'.join(unknown)}", file=sys.stderr)
+        else:
+            allowed = "、".join(item.direction for item in EDGES.values())
+            print(
+                f"不允许的提升方向：{args.source} → {args.target}"
+                f"（spec/000 §2.2 只允许 {allowed}）",
+                file=sys.stderr,
+            )
         return 1
 
     try:

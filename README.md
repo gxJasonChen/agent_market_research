@@ -167,7 +167,8 @@ scripts/    启动与冒烟脚本
 - Claude（开发 Agent）只操作 `bugfix` 分支，不手动开 PR
 - CI 的 `open-pr` job 在门禁通过后自动开 PR 到 `development` 并 @ QA；`branch-guard` job 校验提升不变量
 - `development` 由 Codex 操作（`--ff-only`），`main` 只接受人工合并（`--no-ff` + tag）
-- 合并前用 `python scripts/check_promotion.py <源分支> <目标分支>` 自检（只读，不合并不推送）
+- 合并前用 `python scripts/check_promotion.py <源分支> <目标分支>` 自检（只读，不合并不推送）；
+  发布边还要给 `--tag vX.Y.Z`——缺了它，「版本号合法」与「版本没发过」两道门禁会变成不检查
 
 ---
 

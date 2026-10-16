@@ -133,7 +133,9 @@ jobs:
 
   open-pr:
     name: 自动开 PR 到 development（通知 Codex）
-    needs: gate
+    # 必须同时等 branch-guard：不变量破了还照常开 PR 并 @Codex 请求 review，
+    # 等于「检查会失败」但「失败了不阻断」——§2.7 要的机械校验就成了摆设。
+    needs: [gate, branch-guard]
     if: github.event_name == 'push' && github.ref == 'refs/heads/bugfix'
     runs-on: ubuntu-latest
     permissions:

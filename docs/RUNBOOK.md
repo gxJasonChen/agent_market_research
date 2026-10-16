@@ -214,7 +214,21 @@ DELETE FROM jobs WHERE job_id = '<id>';   -- events 有 ON DELETE CASCADE
 
 应用无状态，回滚 = 切回上一个版本的代码再启动（数据库表结构向下兼容：只有新增列才会破坏，目前没有）。
 
-发布用 `--no-ff`，所以一次发布就是一个合并提交，可以整体回退：`git revert -m 1 <merge-sha>`。
+发布用 `--no-ff`，所以一次发布就是一个合并提交，这是个能整体回退的单位。
+
+**但不要在 `main` 上直接 `git revert -m 1 <merge-sha>`。** 那会在 `main` 上留下一个 `bugfix`
+没有的提交，不变量 2（`spec/000` §2.3）当场为红，而且没有合法办法消除它——要消除就得把该提交
+弄回 `development`，正是 §2.2 禁止的反向流动。守卫会拦住下一次发布：
+
+```
+$ python scripts/check_promotion.py development main --tag v0.2.0
+阻断点：
+  - main 上有 development 没有的提交（1 个），已经分叉——按 spec/000 §2.3 停下来查因
+```
+
+正确路径：**在 `bugfix` 上 revert 出问题的提交，再走 A→B 两次提升**。回滚因此也要过一遍 QA
+门禁，这是有意的。紧急到等不了两步提升的场景目前不受支持（`spec/000` §2.6 对 hotfix 也是同样
+的取舍：真需要独立通道时再引入，且必须连回流一起设计）。
 
 ### 7.3 发布清单（`spec/000` §2.5）
 
