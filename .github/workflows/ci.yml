@@ -288,9 +288,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${AMR_CODEX_KEY}" ]; then
-            echo "缺少 secret AMR_CODEX_KEY——先在仓库 Settings → Secrets 里配好" >&2
+            echo "AMR_CODEX_KEY 没有传进来（长度为 0）。常见原因，按概率排：" >&2
+            echo "  1. 加成了 Variable 而不是 Secret——Settings → Secrets and variables" >&2
+            echo "     → Actions 页面上有 Secrets / Variables 两个 tab，必须在 Secrets 里" >&2
+            echo "  2. 名字不完全一致——要一字不差是 AMR_CODEX_KEY" >&2
+            echo "  3. 加成了 Environment secret——那种要 job 里声明 environment: 才取得到" >&2
             exit 1
           fi
+          # 只打印长度：既不泄露值，又能证明注入成功（排查时一眼看出是「没配」还是「配了但值不对」）
+          echo "AMR_CODEX_KEY 已注入，长度 ${#AMR_CODEX_KEY}"
           mkdir -p "${HOME}/.codex"
           # 用 shell 变量展开而不是 GitHub 表达式语法：密钥只在进程环境里出现，
           # 不会被表达式替换写进脚本文本。
