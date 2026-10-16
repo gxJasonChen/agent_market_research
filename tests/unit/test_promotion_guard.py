@@ -232,6 +232,10 @@ def test_with_system_implies_run_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(guard, "evaluate", lambda *_a, **_kw: guard.Verdict(ok=True))
     monkeypatch.setattr(guard, "collect_facts", lambda *_a, **_kw: _facts(INTEGRATION))
     monkeypatch.setattr(guard, "_git", lambda *_a, **_kw: "")
+    # 必须把 `_ref_exists` 也打桩：`main()` 会拿它判断目标分支在不在，而这里的
+    # `args.repo` 是**真实仓库**——不隔离的话测试就依赖外层仓库恰好有哪些分支
+    # （CI 的 checkout 里没有本地 `development`，`main()` 会提前 return 0）。
+    monkeypatch.setattr(guard, "_ref_exists", lambda *_a, **_kw: True)
 
     guard.main(["bugfix", "development", "--with-system"])
 
@@ -241,13 +245,22 @@ def test_with_system_implies_run_gates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_without_gate_flags_nothing_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """TC-U-032（REQ-015） 两个门禁开关都不给时不该跑测试——门禁是显式 opt-in。"""
     called: list[bool] = []
+    collected: list[bool] = []
     monkeypatch.setattr(
         guard, "run_gates", lambda _repo, *, with_system: (called.append(with_system), ())[1]
     )
     monkeypatch.setattr(guard, "evaluate", lambda *_a, **_kw: guard.Verdict(ok=True))
-    monkeypatch.setattr(guard, "collect_facts", lambda *_a, **_kw: _facts(INTEGRATION))
+    monkeypatch.setattr(
+        guard,
+        "collect_facts",
+        lambda *_a, **_kw: (collected.append(True), _facts(INTEGRATION))[1],
+    )
     monkeypatch.setattr(guard, "_git", lambda *_a, **_kw: "")
+    monkeypatch.setattr(guard, "_ref_exists", lambda *_a, **_kw: True)
 
     guard.main(["bugfix", "development"])
 
+    # 先确认真的走到了判定阶段：否则「没跑门禁」可能只是 main() 提前退出了，
+    # 这条用例就成了空转（它自己就是这么漏过一次的）。
+    assert collected == [True]
     assert called == []
