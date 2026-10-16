@@ -269,3 +269,53 @@ $ python scripts/check_promotion.py development main --tag v0.2.0
 **暂不支持**独立通道（`spec/000` §2.6）：`main` 上的紧急修复同样走
 `bugfix` → `development` → `main` 两次提升。真需要独立通道时，按 §2.6 的顺序引入，
 否则 `main` 上会留下 `bugfix` 没有的提交，下一次发布就会从「提升」变成「真合并」。
+
+---
+
+## 8. 自动评审（Codex QA）
+
+`.github/workflows/codex-qa.yml`：`ci.yml` 跑完之后接手，对刚推上 `bugfix` 的 commit 做
+code review，把 Findings 贴回 PR（`spec/000` §2.9 的 review 循环）。
+
+**它不做什么**（刻意的）：不合并、不推送、不改代码。`permissions.contents` 是 `read`，
+合并 `development` 是 QA 的决定，需要人明确授权之后才加——`tests/unit/test_ci_workflow.py`
+里有一条断言专门挡着「顺手把 contents 提成 write」。
+
+### 8.1 一次性配置
+
+1. 仓库 **Settings → Secrets and variables → Actions → New repository secret**，
+   建 `AMR_CODEX_KEY`，值是模型端点的 API key。
+2. 确认 workflow 里 `[model_providers.amr]` 的 `base_url` 与 `model` 对得上你要用的端点
+   （默认 `https://api.deepseek.com/` + `deepseek-flash`）。换端点改这一段即可。
+3. **workflow 文件必须存在于默认分支上才会生效**。`workflow_run` 与 `issue_comment`
+   这类事件取的是**默认分支**的 workflow 文件——所以本文件要先经
+   `bugfix` → `development` → `main` 走到 `main` 之后才会真正开跑。在那之前它**不会有
+   任何运行记录**，check 也全绿，容易误判成「配好了」。
+
+### 8.2 为什么不监听那句 `@codex` 评论
+
+`ci.yml` 的 `open-pr` job 会发一句 `@codex …`。它**不能**用来触发这个 workflow：
+
+> GitHub 明确规定，**用 `GITHUB_TOKEN` 执行的动作所产生的事件，不会启动新的
+> workflow run**（防止递归触发）。
+
+那句评论正是 `GITHUB_TOKEN` 发的，所以监听 `issue_comment` 等于监听一个永不触发的事件：
+运行记录一片空白、check 全绿，唯一症状是「Codex 从不出现」。本 workflow 因此改用
+`workflow_run`（监听「CI 跑完了」），不受那条规则限制。
+
+同一条规则在本仓库已经咬过两次，排查时先想到它：
+
+| 症状 | 成因 |
+|---|---|
+| CI 自己开的 PR，check 列表里某个 job 永远 `skipping` | 该 job 只挂 `pull_request`，而 bot 开的 PR 其运行被扣在 `action_required` |
+| 换触发方式后 workflow 完全不跑 | 事件由 `GITHUB_TOKEN` 产生，不启动新运行 |
+| `workflow_run` 的 workflow 明明写了却不跑 | 文件还不在默认分支（`main`）上 |
+
+### 8.3 排查
+
+| 症状 | 看哪里 |
+|---|---|
+| PR 上出现「Codex 没有产出结论」 | 该次运行的 Actions 日志；多半是 `AMR_CODEX_KEY` 失效/额度用尽，或端点不认配置里的模型名 |
+| 完全没有评论 | 有没有打开的 `bugfix → development` PR；以及 §8.1 第 3 条 |
+| 评审结论明显跑偏 | workflow 里那段 `codex exec` 的提示词——分层红线与分级口径都写在那儿 |
+| token 烧太快 | `timeout-minutes`、`concurrency` 分组，以及提示词里要求的输出篇幅 |
