@@ -115,9 +115,15 @@ git push origin main --tags
 | 位置 | 检查 |
 |---|---|
 | 本地/手工 | `python scripts/check_promotion.py <源分支> <目标分支> [--tag vX.Y.Z] [--run-gates]` |
-| CI | `.github/workflows/ci.yml` 的 `branch-guard` job：PR 上校验「目标分支没有源分支之外的提交」 |
+| CI（push 到 `bugfix`） | `.github/workflows/ci.yml` 的 `branch-guard` job：校验 `development` 上没有 `bugfix` 之外的提交 |
+| CI（PR） | 同一个 job：校验 base 上没有 head 之外的提交 |
 
-两边都**只读**：不合并、不推送，只给结论、阻断点和该执行的命令。
+CI 侧**两个触发点都要挂**。只挂 `pull_request` 是不够的：CI 自动开出来的 PR 由
+`GITHUB_TOKEN` 触发，其 workflow 运行会被扣在 `action_required` 等人工批准，一个 job
+都不会执行，这道校验于是在自动流程里从不运行。push 到 `bugfix` 的运行不需要批准，
+`gate` 本来就是这么拿到 CI 覆盖的，不变量同理。
+
+两处都**只读**：不合并、不推送，只给结论、阻断点和该执行的命令。
 守卫自身有用例证明不是「永远通过」（`tests/unit/test_promotion_guard.py`、`tests/integration/test_promotion_guard.py`）。
 
 ---

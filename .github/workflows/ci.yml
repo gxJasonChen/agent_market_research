@@ -2,7 +2,7 @@ name: CI
 
 # 多 Agent 交付流水线里属于 CI 的那一段（spec/000 §2）：
 #   1. gate         —— 本地门禁在干净环境里再跑一遍（lint / type / test）
-#   2. branch-guard —— PR 上校验提升不变量：目标分支不能有源分支之外的提交
+#   2. branch-guard —— 校验提升不变量：目标分支不能有源分支之外的提交
 #   3. open-pr      —— push 到 bugfix 后自动开 PR 到 development，通知 QA Agent（Codex）
 # Claude 不手动开 PR；development 由 Codex 操作；main 只接受人工合并。
 
@@ -91,7 +91,14 @@ jobs:
   # 用**同一份实现**（scripts/check_promotion.py），避免出现「CI 一套规则、本地另一套」。
   branch-guard:
     name: 分支不变量（spec/000 §2）
-    if: github.event_name == 'pull_request'
+    # 不能只挂 pull_request。CI 自己开出来的 PR 由 GITHUB_TOKEN 触发，那种运行会被
+    # 扣在 action_required 等人工批准，一个 job 都不会执行——于是这道「机械校验」
+    # 在最需要它的自动流程里从不运行（PR #1 的 run 38860330996 即此）。
+    # push 到 bugfix 的运行不需要批准，而 gate 本来就是这么拿到 CI 覆盖的；
+    # 不变量挂在同一处，才真的在改动落地那一刻被检查。
+    if: >
+      github.event_name == 'pull_request'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/bugfix')
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -107,11 +114,22 @@ jobs:
 
       - name: 校验提升方向与「不带私货」
         env:
-          SOURCE_REF: ${{ github.head_ref }}
-          TARGET_REF: ${{ github.base_ref }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          python3 scripts/check_promotion.py "origin/${SOURCE_REF}" "origin/${TARGET_REF}"
+          # PR 上比对 head/base；push 到 bugfix 时比对 bugfix/development。
+          # `github.head_ref` / `github.base_ref` 只在 pull_request 事件里有值。
+          if [ "${EVENT}" = "pull_request" ]; then
+            source_ref="${HEAD_REF}"
+            target_ref="${BASE_REF}"
+          else
+            source_ref="bugfix"
+            target_ref="development"
+          fi
+          echo "校验提升边：${source_ref} → ${target_ref}"
+          python3 scripts/check_promotion.py "origin/${source_ref}" "origin/${target_ref}"
 
   open-pr:
     name: 自动开 PR 到 development（通知 Codex）
