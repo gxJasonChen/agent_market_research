@@ -221,20 +221,49 @@ def test_tag_pointing_at_a_tree_does_not_break_the_guard(repo: Path) -> None:
     assert "无法采集事实" not in result.stdout + result.stderr
 
 
-def test_missing_target_branch_is_a_no_op(repo: Path) -> None:
-    """TC-I-015（REQ-015） 目标分支还不存在时退 0，不当成错误——那是 bootstrap 的正常状态。
+def test_missing_target_branch_is_not_a_pass(repo: Path) -> None:
+    """TC-I-015（REQ-015） 目标分支真的不存在时，退出码必须与「通过」可区分。
 
-    新仓库第一次 push 到 `bugfix` 时 `development` 还不存在，而 ci.yml 里专门有一步
-    负责创建它。这里退 1 会让依赖 `branch-guard` 的 `open-pr` 被连带 skip，
-    那一步永远到不了，交棒彻底停摆。
+    bootstrap 是正常状态（新仓库第一次 push 到 `bugfix`，ci.yml 里专门有一步创建
+    `development`），所以要放过而不是退 1——否则依赖 `branch-guard` 的 `open-pr`
+    会被连带 skip，那一步永远到不了，交棒停摆。
+
+    但放过**不等于通过**：退 0 会让一个取不到目标分支的环境把发布门禁静默变成绿灯，
+    而这正是守卫最不该有的失效方式。跳过用 2，通过才是 0。
     """
     _git(repo, "branch", "-D", "development")
     _advance_bugfix(repo, "feat: 第一次推送")
 
     result = _run(repo, "bugfix", "development")
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.returncode != 0
     assert "还不存在" in result.stdout + result.stderr
+
+
+def test_target_falls_back_to_origin_when_local_branch_absent(repo: Path) -> None:
+    """TC-I-015（REQ-015） 本地没有目标分支时退回 `origin/<目标>`，不能当成 bootstrap。
+
+    规格与手册给的调用形式**全是裸分支名**（`check_promotion.py development main --tag vX`），
+    而它们出现的场合——CI 的 checkout、`git clone -b <分支>`、worktree——本地往往只有源分支。
+    `RUNBOOK` §7.3 教的顺序更是「先跑守卫」再 `git checkout main`，那时本地根本没有 `main`。
+    不退回的话，发布清单上的「守卫放行」会读到一个**假的通过**，连 `--tag` 都不被校验。
+    """
+    _advance_bugfix(repo, "feat: 批次一")
+    _accept_into_development(repo)
+    _release_to_main(repo, "v0.1.0")
+    _advance_bugfix(repo, "feat: 批次二")
+    _accept_into_development(repo)
+
+    # 造出「只有 origin/main、没有本地 main」的检出
+    _git(repo, "update-ref", "refs/remotes/origin/main", _git(repo, "rev-parse", "main"))
+    _git(repo, "checkout", "-q", "bugfix")
+    _git(repo, "branch", "-D", "main")
+
+    result = _run(repo, "development", "main", "--tag", "v0.2.0")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "允许提升" in result.stdout
 
 
 def test_tag_on_origin_main_is_not_misplaced_when_local_main_is_stale(repo: Path) -> None:
