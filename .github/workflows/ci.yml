@@ -234,3 +234,134 @@ jobs:
           fi
           gh pr comment "${number}" --repo "${GITHUB_REPOSITORY}" --body \
             "@codex 门禁已全绿，请对 commit \`$(git rev-parse --short HEAD)\` 做 code review 与系统测试。Finding 请直接留评，我会在 \`bugfix\` 分支上修复后重推。"
+
+  # 自动评审：对刚推上 `bugfix` 的 commit 做 code review，把结论贴回 PR。
+  # 开发 Agent 从 PR 读 Findings、在 `bugfix` 上修、重推，本 job 再评审一轮——
+  # spec/000 §2.9 的循环就是这么转起来的。
+  #
+  # ⚠️ 为什么放在 ci.yml 里，而不是单独一个 workflow 挂 `workflow_run`
+  # ---------------------------------------------------------------
+  # `workflow_run` 要求 workflow 文件**存在于默认分支**上。本仓库的 `main` 只接受
+  # 人工发布，所以单独放一个 `workflow_run` workflow，等于要等它跟着
+  # bugfix → development → main 走完一整圈才生效；在那之前 GitHub 只会给它一个
+  # **名为文件路径的失败运行**（无 job、`event=push`、提示 "workflow file issue"），
+  # 而文件本身完全合法——用一个 8 行的最小对照 workflow 实测确认过，同样的症状。
+  #
+  # 放进 ci.yml 跟着 push 触发就没这个问题：push 事件用的是**被推送的那个版本**的
+  # workflow 文件，推上去立刻生效，不用等它上默认分支。
+  #
+  # 另一个已经踩过的坑：别改成监听 `issue_comment` 去接 `open-pr` 那句 `@codex`——
+  # 那句评论是 `GITHUB_TOKEN` 发的，而 `GITHUB_TOKEN` 产生的事件**不会启动新的
+  # workflow run**（防递归）。监听它等于监听一个永不触发的事件：运行记录空白、
+  # check 全绿，唯一症状是「Codex 从不出现」。
+  codex-review:
+    name: Codex 自动评审（spec/000 §2.9）
+    # 门禁绿了才请人评审——先让门禁说了算，也不白烧 token。
+    needs: [gate, branch-guard]
+    # 只在 push 到 bugfix 时跑；PR 事件上不重复跑（同一批 commit 已经评过）
+    if: github.event_name == 'push' && github.ref == 'refs/heads/bugfix'
+    runs-on: ubuntu-latest
+    # 这是按 token 计费的，必须有刹车
+    timeout-minutes: 25
+    # job 级覆盖顶层：需要写 PR 评论，但**不碰 contents**——自动合并的授权不在这里，
+    # 合并 `development` 是 QA 的决定，要人明确点头之后才加。
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 安装 Codex CLI
+        # 钉版本：CLI 的参数与输出格式会变，而本 job 依赖 `-o` 与 `-s`。
+        run: npm i -g @openai/codex@0.162.1
+
+      - name: 写 Codex 配置（密钥只进进程，不落仓库）
+        env:
+          AMR_CODEX_KEY: ${{ secrets.AMR_CODEX_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AMR_CODEX_KEY}" ]; then
+            echo "缺少 secret AMR_CODEX_KEY——先在仓库 Settings → Secrets 里配好" >&2
+            exit 1
+          fi
+          mkdir -p "${HOME}/.codex"
+          # 用 shell 变量展开而不是 ${{ }}：密钥只在进程环境里出现，
+          # 不会被表达式替换写进脚本文本。
+          cat > "${HOME}/.codex/config.toml" <<EOF
+          model_provider = "amr"
+          model = "deepseek-flash"
+          model_reasoning_effort = "high"
+          disable_response_storage = true
+          web_search = "disabled"
+
+          [model_providers.amr]
+          name = "amr"
+          base_url = "https://api.deepseek.com/"
+          wire_api = "responses"
+          experimental_bearer_token = "${AMR_CODEX_KEY}"
+          EOF
+          chmod 600 "${HOME}/.codex/config.toml"
+
+      - name: 评审本次推送
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin development
+          base="origin/development"
+          echo "评审范围：${base}...HEAD（$(git rev-parse --short HEAD)）"
+
+          set +e
+          codex exec -s read-only -o /tmp/findings.md "$(cat <<'PROMPT'
+          对当前仓库 HEAD 相对 origin/development 的改动做 code review（基线：git diff origin/development...HEAD）。
+
+          按 spec/000-constitution.md 的分层红线与编码规范来审。输出 Findings，按 High / Medium / Low 分级，
+          每条给出：文件、行号、问题、为什么是问题（尽量给具体复现路径或反例）、建议改法。
+          判为 High 的，必须给出能证伪它的具体输入或 git 操作序列。
+          没有发现就明确写「无 Finding」，不要为了凑数编问题。
+
+          注意：你在 CI runner 上，可以跑只读命令与测试；跑不了的检查要明确说明。
+          PROMPT
+          )"
+          code=$?
+          set -e
+
+          if [ "${code}" -ne 0 ] || [ ! -s /tmp/findings.md ]; then
+            {
+              echo "⚠️ Codex 没有产出结论（退出码 ${code}）。"
+              echo
+              echo "常见原因：\`AMR_CODEX_KEY\` 失效或额度用尽；端点不支持配置里的模型名。"
+              echo "完整日志见本次运行的 Actions 页面。"
+            } > /tmp/findings.md
+          fi
+
+      - name: 把结论贴回 PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --repo "${GITHUB_REPOSITORY}" \
+            --head bugfix --base development --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -z "${number}" ]; then
+            echo "没有打开的 PR（bugfix → development），跳过留言"
+            exit 0
+          fi
+
+          {
+            echo "## 🤖 Codex 自动评审 — \`$(git rev-parse --short HEAD)\`"
+            echo
+            cat /tmp/findings.md
+            echo
+            echo "---"
+            echo "_由 ci.yml 的 \`codex-review\` job 自动触发（spec/000 §2.9）。_"
+            echo "_Finding 请在 \`bugfix\` 上修复后重推，本 job 会自动再评审一轮。_"
+          } > /tmp/comment.md
+
+          gh pr comment "${number}" --repo "${GITHUB_REPOSITORY}" --body-file /tmp/comment.md
+          echo "已把结论贴到 PR #${number}"

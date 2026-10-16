@@ -1,6 +1,6 @@
 """CI 工作流的触发点与依赖关系（spec/000 §2.7–§2.9）。
 
-用例编号：TC-U-033（`ci.yml` 的门禁与交棒）、TC-U-034（`codex-qa.yml` 的自动评审）。
+用例编号：TC-U-033（门禁与交棒）、TC-U-034（Codex 自动评审的接线方式）。
 
 需求追溯：REQ-015（交付流程守卫）。
 
@@ -26,7 +26,6 @@ from amr.config import PROJECT_ROOT
 
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
 CI = WORKFLOWS / "ci.yml"
-CODEX_QA = WORKFLOWS / "codex-qa.yml"
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -52,8 +51,8 @@ def triggers(workflow: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def codex_qa() -> dict[str, Any]:
-    return _load(CODEX_QA)
+def codex_review(workflow: dict[str, Any]) -> dict[str, Any]:
+    return workflow["jobs"]["codex-review"]
 
 
 def test_gate_and_guard_cover_every_push_to_bugfix(triggers: dict[str, Any]) -> None:
@@ -104,62 +103,76 @@ def test_pull_request_trigger_covers_both_promotion_targets(
     assert set(triggers["pull_request"]["branches"]) == {"development", "main"}
 
 
-def test_codex_qa_is_driven_by_workflow_run_not_issue_comment(
-    codex_qa: dict[str, Any],
+def test_codex_review_is_not_wired_to_either_silent_failure(
+    triggers: dict[str, Any],
 ) -> None:
-    """TC-U-034（REQ-015） 自动评审必须挂 `workflow_run`，**不能**挂 `issue_comment`。
+    """TC-U-034（REQ-015） 自动评审不能挂 `issue_comment`，也不能挂 `workflow_run`。
 
-    这是本仓库最容易踩、也最容易被「顺手改回去」的坑：`ci.yml` 里那句 `@codex` 评论是
-    用 `GITHUB_TOKEN` 发的，而 `GITHUB_TOKEN` 产生的事件**不会启动新的 workflow run**
-    （防递归触发）。监听它等于监听一个永不触发的事件——运行记录一片空白、check 全绿，
-    唯一的症状是「Codex 从不出现」，而症状本身没有任何地方会报错。
+    两个坑都是**实测**踩出来的，都会静默失效——没有报错、check 全绿，唯一的症状是
+    「Codex 从不出现」，而症状本身没有任何地方会报错：
 
-    同一条规则这一轮已经咬过两次，所以这里钉死：换触发方式必须先让这条用例红一次。
+    - `issue_comment`：`open-pr` 那句 `@codex` 是 `GITHUB_TOKEN` 发的，而 `GITHUB_TOKEN`
+      产生的事件**不会启动新的 workflow run**（防递归）。监听它等于监听一个永不触发的事件。
+    - `workflow_run`：要求 workflow 文件**存在于默认分支**上。本仓库 `main` 只接受人工
+      发布，所以单独挂它要等跟完整圈才生效；在那之前 GitHub 只会给它一个**名为文件路径的
+      失败运行**（无 job、`event=push`、提示 "workflow file issue"），而文件本身完全合法
+      ——用一个 8 行的最小对照 workflow 实测确认过同样的症状。
+
+    所以评审并进 `ci.yml` 跟着 push 触发：push 事件用的是被推送的那个版本的 workflow
+    文件，推上去立刻生效，不用等它上默认分支。
     """
-    triggers = _on(codex_qa, CODEX_QA)
-
-    assert "workflow_run" in triggers
     assert "issue_comment" not in triggers
-    assert "pull_request" not in triggers
-    assert triggers["workflow_run"]["workflows"] == ["CI"]
+
+    offenders = [
+        path.name
+        for path in sorted(WORKFLOWS.glob("*.y*ml"))
+        if "workflow_run" in _on(_load(path), path)
+    ]
+    assert offenders == [], (
+        f"{offenders} 挂了 workflow_run：它要求文件在默认分支上，否则永远不会执行。"
+        f"要么并进 ci.yml，要么先把它送到 main。"
+    )
 
 
-def test_codex_qa_only_follows_a_green_push_to_bugfix(codex_qa: dict[str, Any]) -> None:
-    """TC-U-034（REQ-015） 只在「push 到 `bugfix` 且 `ci.yml` 全绿」之后请人评审。
+def test_codex_review_only_runs_on_push_to_bugfix(codex_review: dict[str, Any]) -> None:
+    """TC-U-034（REQ-015） 评审只在 push 到 `bugfix` 时跑，而且要等门禁绿。
 
-    门禁红的时候不该请人评审——先让门禁说了算。三条限定缺一条，这个 job 就会在
-    不该跑的时候跑（白烧 token），或在该跑的时候不跑。
+    门禁红的时候不该请人评审——先让门禁说了算，也不白烧 token。
     """
-    condition = codex_qa["jobs"]["review"]["if"]
+    condition = codex_review["if"]
 
     assert isinstance(condition, str)
-    assert "workflow_run.conclusion == 'success'" in condition
-    assert "workflow_run.head_branch == 'bugfix'" in condition
-    assert "workflow_run.event == 'push'" in condition
+    assert "github.event_name == 'push'" in condition
+    assert "refs/heads/bugfix" in condition
     assert "${{" not in condition, "`if` 里不该有未展开的 ${{ }}"
 
+    needs = codex_review["needs"]
+    listed = [needs] if isinstance(needs, str) else list(needs)
+    assert "gate" in listed
+    assert "branch-guard" in listed
 
-def test_codex_qa_cannot_write_contents(codex_qa: dict[str, Any]) -> None:
-    """TC-U-034（REQ-015） 自动评审没有写权限——**自动合并的授权不在这里**。
+
+def test_codex_review_cannot_write_contents(codex_review: dict[str, Any]) -> None:
+    """TC-U-034（REQ-015） 自动评审没有内容写权限——**自动合并的授权不在这里**。
 
     合并 `development` 是 QA（Codex）的决定，要人明确点头之后才加。把这条断言写下来，
     是为了让「顺手把 contents 提成 write，好让它自动合并」这个改动必须先让测试红一次，
     而不是在某个深夜悄悄发生。
     """
-    permissions = codex_qa["permissions"]
+    permissions = codex_review["permissions"]
 
     assert permissions.get("contents") == "read"
+    assert permissions.get("pull-requests") == "write"
 
 
-def test_codex_qa_reviews_in_a_read_only_sandbox(codex_qa: dict[str, Any]) -> None:
+def test_codex_review_runs_read_only_with_a_timeout(codex_review: dict[str, Any]) -> None:
     """TC-U-034（REQ-015） 评审跑在只读沙箱里，且带超时刹车。
 
     评审是只读活动，给它写权限没有任何正当理由；而这是按 token 计费的，
     没有 `timeout-minutes` 就等于没有刹车。
     """
-    job = codex_qa["jobs"]["review"]
-    script = "\n".join(str(step.get("run", "")) for step in job["steps"])
+    script = "\n".join(str(step.get("run", "")) for step in codex_review["steps"])
 
     assert "-s read-only" in script
     assert "--dangerously-bypass-approvals-and-sandbox" not in script
-    assert job.get("timeout-minutes")
+    assert codex_review.get("timeout-minutes")

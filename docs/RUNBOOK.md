@@ -274,8 +274,8 @@ $ python scripts/check_promotion.py development main --tag v0.2.0
 
 ## 8. 自动评审（Codex QA）
 
-`.github/workflows/codex-qa.yml`：`ci.yml` 跑完之后接手，对刚推上 `bugfix` 的 commit 做
-code review，把 Findings 贴回 PR（`spec/000` §2.9 的 review 循环）。
+`ci.yml` 的 `codex-review` job：门禁全绿之后，对刚推上 `bugfix` 的 commit 做 code review，
+把 Findings 贴回 PR（`spec/000` §2.9 的 review 循环）。
 
 **它不做什么**（刻意的）：不合并、不推送、不改代码。`permissions.contents` 是 `read`，
 合并 `development` 是 QA 的决定，需要人明确授权之后才加——`tests/unit/test_ci_workflow.py`
@@ -284,32 +284,49 @@ code review，把 Findings 贴回 PR（`spec/000` §2.9 的 review 循环）。
 ### 8.1 一次性配置
 
 1. 仓库 **Settings → Secrets and variables → Actions → New repository secret**，
-   建 `AMR_CODEX_KEY`，值是模型端点的 API key。
-2. 确认 workflow 里 `[model_providers.amr]` 的 `base_url` 与 `model` 对得上你要用的端点
+   建 `AMR_CODEX_KEY`，值是模型端点的 API key。**没配时 job 会明确报错**，
+   不会静默出一份空结论。
+2. 确认 job 里 `[model_providers.amr]` 的 `base_url` 与 `model` 对得上你要用的端点
    （默认 `https://api.deepseek.com/` + `deepseek-flash`）。换端点改这一段即可。
-3. **workflow 文件必须存在于默认分支上才会生效**。`workflow_run` 与 `issue_comment`
-   这类事件取的是**默认分支**的 workflow 文件——所以本文件要先经
-   `bugfix` → `development` → `main` 走到 `main` 之后才会真正开跑。在那之前它**不会有
-   任何运行记录**，check 也全绿，容易误判成「配好了」。
+3. 推一次 `bugfix` 即可生效——push 事件用的是**被推送的那个版本**的 workflow 文件，
+   不用等它上默认分支。
 
-### 8.2 为什么不监听那句 `@codex` 评论
+### 8.2 为什么不是一个单独的 `workflow_run` workflow
 
-`ci.yml` 的 `open-pr` job 会发一句 `@codex …`。它**不能**用来触发这个 workflow：
+三种接法都试过，前两种都**不成立**，而且失效方式全都是静默的：
 
-> GitHub 明确规定，**用 `GITHUB_TOKEN` 执行的动作所产生的事件，不会启动新的
-> workflow run**（防止递归触发）。
+| 接法 | 结论 |
+|---|---|
+| `issue_comment`（接 `open-pr` 那句 `@codex`） | ❌ 那句评论是 `GITHUB_TOKEN` 发的，而 `GITHUB_TOKEN` 产生的事件**不会启动新的 workflow run**（防递归）。监听它等于监听一个永不触发的事件 |
+| `workflow_run`（CI 跑完触发） | ❌ 要求 workflow 文件**存在于默认分支**上。本仓库 `main` 只接受人工发布，所以它要等跟完整圈才生效 |
+| **并进 `ci.yml` 跟随 push**（现用） | ✅ push 用的是被推送版本的 workflow 文件，推上去立刻生效 |
 
-那句评论正是 `GITHUB_TOKEN` 发的，所以监听 `issue_comment` 等于监听一个永不触发的事件：
-运行记录一片空白、check 全绿，唯一症状是「Codex 从不出现」。本 workflow 因此改用
-`workflow_run`（监听「CI 跑完了」），不受那条规则限制。
+`workflow_run` 那个坑症状特别隐蔽：GitHub 会给它一个**名为文件路径的失败运行**——
+无 job、`event=push`、提示 "This run likely failed because of a workflow file issue"，
+**而文件本身完全合法**（YAML 结构逐键核对过）。当时用一个 8 行的最小对照 workflow
+才确认是触发方式的问题、不是文件的问题。`tests/unit/test_ci_workflow.py` 里有一条断言
+挡着任何 workflow 再挂 `workflow_run`。
 
-同一条规则在本仓库已经咬过两次，排查时先想到它：
+### 8.3 排查
+
+| 症状 | 看哪里 |
+|---|---|
+| PR 上出现「Codex 没有产出结论」 | 该次运行的 Actions 日志；多半是 `AMR_CODEX_KEY` 失效/额度用尽，或端点不认配置里的模型名 |
+| 完全没有评论 | 有没有打开的 `bugfix → development` PR；`codex-review` 是否被 `needs` 连带 skip（门禁红了就不评审，这是有意的） |
+| 评审结论明显跑偏 | `codex-review` 里那段 `codex exec` 的提示词——分层红线与分级口径都写在那儿 |
+| token 烧太快 | `timeout-minutes`、提示词里要求的输出篇幅 |
+
+### 8.4 一条通用的排查线索
+
+上面几种失效**全都静默**：没有报错、check 全绿，唯一症状是「某个环节从不发生」。
+遇到这类问题，先按这条线索查：
 
 | 症状 | 成因 |
 |---|---|
 | CI 自己开的 PR，check 列表里某个 job 永远 `skipping` | 该 job 只挂 `pull_request`，而 bot 开的 PR 其运行被扣在 `action_required` |
 | 换触发方式后 workflow 完全不跑 | 事件由 `GITHUB_TOKEN` 产生，不启动新运行 |
-| `workflow_run` 的 workflow 明明写了却不跑 | 文件还不在默认分支（`main`）上 |
+| 某个 workflow 只有「名为文件路径的失败运行」 | 它挂了 `workflow_run`，而文件不在默认分支上 |
+| 本地门禁全绿但 CI 红 | 用例依赖了外层仓库状态（分支、ref），CI 的 checkout 里没有 |
 
 ### 8.3 排查
 
