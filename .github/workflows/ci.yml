@@ -1,8 +1,9 @@
 name: CI
 
 # 多 Agent 交付流水线里属于 CI 的那一段（spec/000 §2）：
-#   1. gate      —— 本地门禁在干净环境里再跑一遍（lint / type / test）
-#   2. open-pr   —— push 到 bugfix 后自动开 PR 到 development，通知 QA Agent（Codex）
+#   1. gate         —— 本地门禁在干净环境里再跑一遍（lint / type / test）
+#   2. branch-guard —— PR 上校验提升不变量：目标分支不能有源分支之外的提交
+#   3. open-pr      —— push 到 bugfix 后自动开 PR 到 development，通知 QA Agent（Codex）
 # Claude 不手动开 PR；development 由 Codex 操作；main 只接受人工合并。
 
 on:
@@ -85,6 +86,32 @@ jobs:
           name: coverage
           path: coverage.xml
           if-no-files-found: ignore
+
+  # 提升规则是 spec/000 §2 的核心约束，不能只写在文档里（§2.7）。这里和第二道门禁
+  # 用**同一份实现**（scripts/check_promotion.py），避免出现「CI 一套规则、本地另一套」。
+  branch-guard:
+    name: 分支不变量（spec/000 §2）
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 不变量要同时看到 base 与 head 两侧，而 checkout 在 PR 事件下只取当前 ref，
+      # 所以显式把所有分支拉成远程跟踪引用（凭证由 checkout 持久化，fetch 直接复用）。
+      - name: 拉全量分支引用
+        run: git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: 校验提升方向与「不带私货」
+        env:
+          SOURCE_REF: ${{ github.head_ref }}
+          TARGET_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_promotion.py "origin/${SOURCE_REF}" "origin/${TARGET_REF}"
 
   open-pr:
     name: 自动开 PR 到 development（通知 Codex）

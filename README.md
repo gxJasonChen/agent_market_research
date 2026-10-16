@@ -160,12 +160,14 @@ scripts/    启动与冒烟脚本
 需求 → REQ 编号 → 冻结契约 → 写测试（红）→ 实现（绿）→ 重构
      → 本地门禁 → push bugfix → CI 自动开 PR → Codex review
                                           ↓ FAIL：回 bugfix 修，重跑门禁
-                                          ↓ PASS：系统测试 → 合并 development
+                                          ↓ PASS：系统测试 → --ff-only 合 development
+                                                         → 人工 --no-ff 合 main → 打 tag
 ```
 
 - Claude（开发 Agent）只操作 `bugfix` 分支，不手动开 PR
-- CI 的 `open-pr` job 在门禁通过后自动开 PR 到 `development` 并 @ QA
-- `development` 由 Codex 操作，`main` 只接受人工合并
+- CI 的 `open-pr` job 在门禁通过后自动开 PR 到 `development` 并 @ QA；`branch-guard` job 校验提升不变量
+- `development` 由 Codex 操作（`--ff-only`），`main` 只接受人工合并（`--no-ff` + tag）
+- 合并前用 `python scripts/check_promotion.py <源分支> <目标分支>` 自检（只读，不合并不推送）
 
 ---
 

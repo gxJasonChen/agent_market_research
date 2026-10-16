@@ -18,21 +18,107 @@
 8. **CI**：GitHub Actions 自动开 PR（`bugfix` → `development`）通知 QA Agent（Codex）。
 9. **Review 循环**：Codex 提 Finding → 在 `bugfix` 上修 → 重跑门禁 → 再 push。High 未清零不停止。
 10. **系统测试**：review 通过后，在真实中间件 + 真实模型网关上跑端到端验收。
+11. **发布**：人按 `docs/RUNBOOK.md` §7 的清单把 `development` 以 `--no-ff` 合进 `main` 并打 tag（见 §2.5）。
 
 > **TDD 的「红」是硬要求**：不允许先写实现再补测试。若某次改动确实无法先写测试（如纯文档），必须在 PR 描述中显式说明理由。
 
 ---
 
-## 2. 分支模型
+## 2. 分支模型与合并规则
+
+### 2.1 归属
 
 | 分支 | 归属 | 规则 |
 |---|---|---|
-| `main` | 人 | 只接受人工合并，代表可发布状态 |
+| `main` | 人 | 只接受人工合并，代表可发布状态；每次合并后打 tag |
 | `development` | **Codex（QA Agent）** | 集成分支。Claude **不碰**（不切、不提交、不推送、不合并） |
 | `bugfix` | **Claude（开发 Agent）** | 唯一工作分支。所有改动（feat / fix / refactor / docs / chore）都落这里 |
 
 - Claude **不手动开 PR**：push 到 `bugfix` 后由 `.github/workflows/ci.yml` 的 `open-pr` job 自动开/更新 PR 到 `development`。
 - 禁止破坏性 git（`push --force`、`reset --hard`、`branch -D`），除非用户明确要求。
+
+### 2.2 两条提升边
+
+只允许下面两个方向，**不许反向**：`main` 不回流 `development`，`development` 不回流 `bugfix`。
+
+| 边 | 方向 | 合并方式 | 执行人 | 门禁 |
+|---|---|---|---|---|
+| **A 集成** | `bugfix` → `development` | `--ff-only` | Codex（QA 通过后） | §2.4 |
+| **B 发布** | `development` → `main` | `--no-ff` | 人（人工合并） | §2.5 |
+
+- **A 用 `--ff-only`**：`bugfix` 是唯一的开发干线，能快进是可预期的结果，`development` 因此恒等于「最后一次被接受的 `bugfix` 头」。**快进失败必须停下来查因**，不许改用普通合并把它盖过去——那说明已经分叉了。
+- **B 用 `--no-ff`**：发布边界要留痕，也需要一个能整体回滚的单位（`git revert -m 1 <merge>`）。合并后在 `main` 的合并提交上打 tag。
+
+### 2.3 不变量
+
+1. **不反向流动**：`development` 上不存在 `bugfix` 没有的提交。
+2. **`main` 不带私货**：`main` 上只允许出现两类提交——历史发布留下的合并提交，以及 `bugfix` 上已有的提交。
+3. **tag 只打在 `main` 上**，版本号 SemVer，从 `v0.1.0` 起。
+
+> 不变量 2 的措辞是刻意的：发布边用 `--no-ff`，`main` 的合并提交**不在** `development` 上，
+> 所以「`main` 是 `development` 的祖先（`main ⊆ development`）」是**错的**说法；
+> 能机械校验的形式是「`main` 上没有 `bugfix` 之外的提交」，见 §2.7。
+
+### 2.4 集成边 A（`bugfix` → `development`）门禁
+
+逐条都满足才允许合并，缺一条就停在 `development` 外面：
+
+- [ ] `§8` 完成定义清单全勾（含 `040` 追溯表、红灯记录）
+- [ ] 本地门禁全绿：`make lint && make type && make test`
+- [ ] CI `gate` job 在 PR 上全绿
+- [ ] code review 完成，**High 级 Finding 清零**
+- [ ] 系统测试在真实中间件上通过（`make test-system`），结果贴进 PR
+- [ ] `python scripts/check_promotion.py bugfix development` 通过
+
+QA 执行的合并与推送：
+
+```bash
+git checkout development
+git merge --ff-only origin/bugfix
+git push origin development
+```
+
+用 `origin/bugfix` 而不是本地 `bugfix`：被接受的是**推上去的那个 sha**，本地分支不作数。
+
+### 2.5 发布边 B（`development` → `main`）门禁
+
+- [ ] `python scripts/check_promotion.py development main --tag vX.Y.Z` 通过
+- [ ] 版本号确定（SemVer），且该 tag 尚不存在
+- [ ] 发布说明写好；面向使用者的 `docs/` 改动随本批次一起发布
+- [ ] `uv.lock` 没有未解释的变动；`config.py` 的字段与 `.env.example` 一致
+- [ ] 系统测试通过，且 `scripts/smoke.sh` 在真实中间件上跑过
+
+人执行的合并与发布（完整清单见 `docs/RUNBOOK.md` §7）：
+
+```bash
+git checkout main
+git merge --no-ff origin/development -m "release: vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin main --tags
+```
+
+### 2.6 hotfix（暂不支持）
+
+`main` 上的紧急修复目前也走 A → B 两次提升：在 `bugfix` 上修，QA 通过后先进 `development`，再发版。
+
+真需要独立通道时再引入，且必须按这个顺序做，否则会破坏 §2.3 的不变量 2：
+
+1. 从 `main` 切 `hotfix/<issue>`（人切）。
+2. 走同一套门禁：本地门禁 + CI `gate` + review + 系统测试。
+3. PR 到 `main`，人合并后打 patch tag（`vX.Y.Z+1`）。
+4. **立刻把 `main` 合回 `development`，再合回 `bugfix`**，让「`main` 不带私货」重新成立。
+
+### 2.7 机械校验
+
+不变量不靠自觉，靠会失败的检查：
+
+| 位置 | 检查 |
+|---|---|
+| 本地/手工 | `python scripts/check_promotion.py <源分支> <目标分支> [--tag vX.Y.Z] [--run-gates]` |
+| CI | `.github/workflows/ci.yml` 的 `branch-guard` job：PR 上校验「目标分支没有源分支之外的提交」 |
+
+两边都**只读**：不合并、不推送，只给结论、阻断点和该执行的命令。
+守卫自身有用例证明不是「永远通过」（`tests/unit/test_promotion_guard.py`、`tests/integration/test_promotion_guard.py`）。
 
 ---
 

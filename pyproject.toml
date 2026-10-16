@@ -39,7 +39,8 @@ packages = ["src/amr"]
 minversion = "8.0"
 testpaths = ["tests"]
 # src 布局：即使没有 editable 安装也能 import amr
-pythonpath = ["src"]
+# scripts：用例要直接 import 提升守卫（scripts/check_promotion.py，spec/000 §2.7）
+pythonpath = ["src", "scripts"]
 addopts = "-ra --strict-markers --strict-config"
 markers = [
     "real_llm: 需要真实模型网关与密钥（默认跳过，用 --run-real-llm 开启）",
@@ -92,7 +93,9 @@ ignore = [
 # ---------------------------------------------------------------- mypy
 [tool.mypy]
 python_version = "3.12"
-files = ["src/amr"]
+# scripts：提升守卫是判定逻辑（scripts/check_promotion.py），不能只在 pytest 里被 import
+# 却不做类型检查——spec/000 §2.7 说这些不变量「靠会失败的检查」守着，守卫自己也该被检查。
+files = ["src/amr", "scripts"]
 mypy_path = "src"
 explicit_package_bases = true
 namespace_packages = true

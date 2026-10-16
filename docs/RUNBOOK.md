@@ -204,8 +204,54 @@ DELETE FROM jobs WHERE job_id = '<id>';   -- events 有 ON DELETE CASCADE
 
 ---
 
-## 7. 升级与回滚
+## 7. 升级、发布与回滚
 
-- 依赖锁定在 `uv.lock`，升级用 `uv lock --upgrade-package <pkg> && uv sync --extra dev`，然后跑完整门禁。
-- 应用无状态，回滚 = 切回上一个版本的代码再启动（数据库表结构向下兼容：只有新增列才会破坏，目前没有）。
-- 发布路径：`bugfix` → CI 自动 PR → Codex 合并 `development` → 人工 merge `main` → 打 tag。
+### 7.1 依赖升级
+
+依赖锁定在 `uv.lock`，升级用 `uv lock --upgrade-package <pkg> && uv sync --extra dev`，然后跑完整门禁。
+
+### 7.2 回滚
+
+应用无状态，回滚 = 切回上一个版本的代码再启动（数据库表结构向下兼容：只有新增列才会破坏，目前没有）。
+
+发布用 `--no-ff`，所以一次发布就是一个合并提交，可以整体回退：`git revert -m 1 <merge-sha>`。
+
+### 7.3 发布清单（`spec/000` §2.5）
+
+发布路径：`bugfix` → CI 自动 PR → Codex 以 `--ff-only` 合进 `development` → **人**以 `--no-ff` 合进 `main` → 打 tag。
+逐条走，缺一条就停在原地：
+
+1. 先跑守卫。它**只读**：给结论、阻断点和该执行的命令，不会替你合并：
+
+   ```bash
+   git fetch --prune origin
+   python scripts/check_promotion.py development main --tag v0.1.0
+   ```
+
+2. 检查清单：
+
+   - [ ] 守卫放行（`main` 上没有 `bugfix` 之外的提交；版本号没被用过）
+   - [ ] 系统测试与冒烟在真实中间件上跑过：`make test-system && bash scripts/smoke.sh`
+   - [ ] `uv.lock` 没有未解释的变动；`config.py` 的字段与 `.env.example` 一致
+   - [ ] 发布说明写好（面向使用者的改动都在 `docs/` 里）
+
+3. 合并与打 tag（**人**执行；`--no-ff` 是刻意的，见 `spec/000` §2.2）：
+
+   ```bash
+   git checkout main
+   git merge --no-ff origin/development -m "release: v0.1.0"
+   git tag -a v0.1.0 -m "v0.1.0"
+   git push origin main --tags
+   ```
+
+4. 发布后确认不变量没被破坏：
+
+   ```bash
+   python scripts/check_promotion.py bugfix development
+   ```
+
+### 7.4 hotfix
+
+**暂不支持**独立通道（`spec/000` §2.6）：`main` 上的紧急修复同样走
+`bugfix` → `development` → `main` 两次提升。真需要独立通道时，按 §2.6 的顺序引入，
+否则 `main` 上会留下 `bugfix` 没有的提交，下一次发布就会从「提升」变成「真合并」。

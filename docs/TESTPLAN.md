@@ -130,5 +130,7 @@ CI(open-pr job)：自动开 PR 到 development，通知 Codex
         ↓
 Codex：code review + make test-system（必要时 --run-real-llm）
         ↓ PASS
-合并 development → 人工 merge main → release
+Codex：--ff-only 合并 development → 跑 python scripts/check_promotion.py 自检
+        ↓
+人：--no-ff 合并 main → 打 tag（发布清单见 docs/RUNBOOK.md §7）
 ```
